@@ -2,9 +2,9 @@
 
 ## 开放
 
-### #7. Relay 批量化（性能）
+### #7. Relay 批量化（Demo 接受）
 
-10K INSERT 150s 收敛延迟。所有 delegate 共享一条 futures channel → relay 逐条 parse_from_bytes → tokio merge → gRPC。方向：relay 按 batch 聚合后再转发。
+10K INSERT 150s 收敛延迟。根因：单 relay task 串行 parse all delegate events。PcrEventBatcher 已具备 1MB/150ms 双阈值 delegate 端聚合，进一步优化（byte forwarding、multi-relay）对 Demo ROI 低。接受为 Demo 级延迟，文档标注。
 
 ### #8. 大值 live CDC 路径（正确性）
 
