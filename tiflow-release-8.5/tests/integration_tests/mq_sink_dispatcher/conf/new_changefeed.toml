@@ -1,5 +1,0 @@
-[sink]
-dispatchers = [
-    {matcher = ['dispatcher.index'], partition = "index-value", index = ""},
-    {matcher = ['dispatcher.columns'], partition = "columns", columns = ['ID', 'CoL1']}
-]
