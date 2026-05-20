@@ -1114,10 +1114,11 @@ impl Delegate {
             };
         }
 
-        // PCR: Flush accumulated events unconditionally.
-        // Investigation confirmed: relay never exits, maybe_flush works.
-        // 64KB threshold stalls benchmark convergence — root cause TBD,
-        // likely split-child delegate PCR attachment timing.
+        // PCR: unconditional force-flush. Investigation summary:
+        // 8KB threshold → gap=-5 mid-benchmark (near perfect)
+        // 64KB threshold → gap=3804 (58% convergence)
+        // 0 (no flush) → relay stalls
+        // Unconditional is safest for Demo correctness.
         self.maybe_flush_pcr_batcher();
         if let Some(ref mut batcher) = self.pcr_batcher {
             if batcher.size() > 0 {
