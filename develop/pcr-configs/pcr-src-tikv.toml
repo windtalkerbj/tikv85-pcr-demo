@@ -1,0 +1,17 @@
+[server]
+addr = "127.0.0.1:30162"
+status-addr = "127.0.0.1:40185"
+advertise-addr = "127.0.0.1:30162"
+
+[storage]
+data-dir = "/tmp/pcr-src-data"
+reserve-space = "0GB"
+
+[rocksdb]
+max-open-files = 256
+
+[raftstore]
+raftdb-path = "/tmp/pcr-src-data/raft"
+
+[pd]
+endpoints = ["127.0.0.1:3379"]

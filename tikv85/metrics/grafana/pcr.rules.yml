@@ -1,0 +1,65 @@
+groups:
+  - name: pcr_alerts
+    rules:
+      - alert: PcrReplicationLagHigh
+        expr: pcr_checkpoint_lag_seconds{instance=~".*"} > 30
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PCR replication lag is high"
+          description: "Instance {{ $labels.instance }} has replication lag of {{ $value }}s (>30s). Check source CDC and network."
+
+      - alert: PcrReplicationLagCritical
+        expr: pcr_checkpoint_lag_seconds{instance=~".*"} > 120
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PCR replication lag is critical"
+          description: "Instance {{ $labels.instance }} has replication lag of {{ $value }}s (>2min). Immediate attention required."
+
+      - alert: PcrStateFailed
+        expr: pcr_state == 6
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PCR task has failed"
+          description: "Instance {{ $labels.instance }} PCR state is Failed. Check logs for error details."
+
+      - alert: PcrStateCuttingOver
+        expr: pcr_state == 3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PCR cutover taking longer than expected"
+          description: "Instance {{ $labels.instance }} PCR has been in CuttingOver state for >10min."
+
+      - alert: PcrNoActiveSubscriptions
+        expr: pcr_state == 1 and pcr_active_subscriptions == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PCR is running but has zero active subscriptions"
+          description: "Instance {{ $labels.instance }} PCR state is Subscribing but active subscriptions = 0. Check source cluster connectivity."
+
+      - alert: PcrActiveSubscriptionsDrop
+        expr: (pcr_active_subscriptions offset 5m) - pcr_active_subscriptions > 20
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PCR active subscriptions dropped significantly"
+          description: "Instance {{ $labels.instance }} lost {{ $value }} active subscriptions in 5 minutes."
+
+      - alert: PcrBridgeBytesZero
+        expr: pcr_state == 1 and rate(pcr_bridge_bytes_sent_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PCR bridge not sending data"
+          description: "Instance {{ $labels.instance }} PCR is Subscribing but no bridge bytes sent in 5 minutes."

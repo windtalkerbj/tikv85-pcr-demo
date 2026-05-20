@@ -1,0 +1,92 @@
+// Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
+
+syntax = "proto3";
+package pcrpb;
+option go_package = "github.com/pingcap/kvproto/pkg/pcrpb";
+
+// PcrStream provides Physical Cluster Replication streaming between TiKV clusters.
+// The Producer (source cluster) exposes this service; the Consumer (target cluster)
+// connects and subscribes to receive a stream of MVCC-level change events.
+service PcrStream {
+    // Subscribe connects to a specific Region partition on the source cluster
+    // and receives a stream of PcrEvent messages containing MVCC key-value
+    // changes, SST chunks, checkpoints, and split notifications.
+    rpc Subscribe(PcrSubscribeRequest) returns (stream PcrEvent) {}
+}
+
+message PcrSubscribeRequest {
+    uint64 stream_id   = 1;  // Unique stream identifier
+    uint64 start_ts    = 2;  // Resume from this resolved timestamp (for checkpoint recovery)
+    PcrPartitionSpec partition = 3;  // Which Region partition to subscribe to
+}
+
+message PcrPartitionSpec {
+    uint64 region_id              = 1;  // Source Region ID
+    bytes  start_key              = 2;  // Region start key (inclusive)
+    bytes  end_key                = 3;  // Region end key (exclusive)
+    uint64 region_epoch_conf_ver  = 4;  // For epoch validation
+    uint64 region_epoch_version   = 5;
+}
+
+// ---- Event Types ----
+
+message PcrEvent {
+    uint64 stream_seq = 1;  // Monotonically increasing; Consumer uses for dedup
+
+    oneof event {
+        PcrKvBatch     kv_batch      = 2;
+        PcrSstChunk    sst_chunk     = 3;
+        PcrCheckpoint  checkpoint    = 4;
+        PcrDeleteRange delete_range  = 5;
+        PcrSplit       split         = 6;
+    }
+    bool is_snapshot = 7;  // true = initial full scan data, false = incremental CDC
+}
+
+// Batch of individual MVCC KV pairs (normal transactional writes)
+message PcrKvBatch {
+    repeated PcrKV kvs = 1;
+}
+
+// A single MVCC-encoded key-value pair
+message PcrKV {
+    bytes  key   = 1;   // MVCC-encoded key (includes timestamp suffix)
+    bytes  value = 2;   // MVCC-encoded value
+    OpType op    = 3;   // Operation type
+    string cf    = 4;   // Column family ("default", "write", "lock")
+}
+
+enum OpType {
+    PUT    = 0;
+    DELETE = 1;
+}
+
+// Pre-built SST file chunk (from Lightning/fast-DDL/BR bulk writes).
+// The Consumer can ingest this directly without re-sorting or re-generating
+// an SST, providing an optimized fast path for bulk data.
+message PcrSstChunk {
+    bytes  data       = 1;   // Complete SST file content
+    bytes  start_key  = 2;   // Key range covered by this SST
+    bytes  end_key    = 3;
+    uint64 write_ts   = 4;   // MVCC timestamp applied to all keys in this SST
+}
+
+// Resolved timestamp checkpoint — all data up to resolved_ts has been emitted
+// for the listed Regions.
+message PcrCheckpoint {
+    uint64 resolved_ts             = 1;  // All data before this TS has been sent
+    repeated uint64 region_ids     = 2;  // Regions covered by this checkpoint
+}
+
+// Range deletion event
+message PcrDeleteRange {
+    bytes  start_key = 1;
+    bytes  end_key   = 2;
+    uint64 ts        = 3;
+}
+
+// Region split notification — Consumer must subscribe to new child Regions
+message PcrSplit {
+    bytes split_key = 1;             // New boundary between split Regions
+    repeated uint64 new_region_ids = 2;  // All Region IDs resulting from the split (including resized left region)
+}

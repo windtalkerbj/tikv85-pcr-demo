@@ -1,0 +1,4 @@
+- [中文交流偏好](user-chinese.md) — 用户全程使用中文，所有内容以中文为主
+- [CockroachDB PCR 架构分析](pcr-architecture.md) — PCR 生产者、消费者、线协议及核心设计原则的深入分析
+- [TiKV PCR 可行性评估](tikv-pcr-feasibility.md) — TiKV 已有能力、关键缺失项、改造工作量估算（总计 14-18 周）
+- [TiCDC Pipeline 对比](ticdc-pipeline-comparison.md) — TiCDC PULL→SORTER→MOUNTER→SINKER 能否复用于 PCR consumer 的分析

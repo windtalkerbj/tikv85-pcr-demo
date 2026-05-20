@@ -1,0 +1,205 @@
+// Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
+
+//! PCR gRPC service — Producer-side server (SOURCE cluster).
+//!
+//! Implements the `PcrStream` trait (generated from `pcrpb.proto`) to stream
+//! MVCC KV change events, SST chunks, checkpoints, and split notifications
+//! to a PCR Consumer (target cluster).
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use futures::channel::mpsc;
+use futures::{SinkExt, StreamExt};
+use grpcio::*;
+use protobuf::Message;
+use slog_global::{error, info, warn};
+use stream_ingest::pcrpb::*;
+use stream_ingest::pcrpb_grpc::PcrStream;
+use tikv_util::worker::Scheduler;
+
+use stream_ingest::metrics::STREAM_INGEST_METRICS;
+
+use crate::endpoint::Task;
+
+/// PCR gRPC service — handles Subscribe RPCs from target TiKV clusters.
+#[derive(Clone)]
+pub struct Service {
+    scheduler: Scheduler<Task>,
+    /// Source TiKV data directory for initial snapshot scans.
+    /// None if snapshot scanning is disabled.
+    data_dir: Option<String>,
+    /// Shared CDC resolved_ts updated by the Endpoint on each on_min_ts cycle.
+    pcr_resolved_ts: Arc<AtomicU64>,
+    /// PCR event batcher buffer size in bytes (default 1MB).
+    event_buffer_size: usize,
+    /// PCR event batcher flush interval in ms (default 150ms).
+    event_flush_interval_ms: u64,
+    /// Shared tokio runtime for PCR bridge tasks (avoids per-Region std::thread).
+    bridge_runtime: Arc<tokio::runtime::Runtime>,
+}
+
+impl Service {
+    pub fn new(
+        scheduler: Scheduler<Task>,
+        data_dir: Option<String>,
+        pcr_resolved_ts: Arc<AtomicU64>,
+        event_buffer_size: usize,
+        event_flush_interval_ms: u64,
+    ) -> Self {
+        let bridge_runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_name("pcr-bridge")
+                .enable_time()
+                .build()
+                .expect("PCR: failed to create bridge tokio runtime"),
+        );
+        Self { scheduler, data_dir, pcr_resolved_ts, event_buffer_size, event_flush_interval_ms, bridge_runtime }
+    }
+}
+
+impl PcrStream for Service {
+    fn subscribe(
+        &mut self,
+        _ctx: RpcContext,
+        req: PcrSubscribeRequest,
+        sink: ServerStreamingSink<PcrEvent>,
+    ) {
+        let partition = req.get_partition();
+        let region_id = if req.has_partition() {
+            partition.get_region_id()
+        } else {
+            0
+        };
+        let start_ts = req.get_start_ts();
+
+        info!(
+            "PCR Subscribe request";
+            "region_id" => region_id,
+            "start_ts" => start_ts,
+            "stream_id" => req.get_stream_id(),
+        );
+
+        // Create a channel: CDC Delegate → gRPC bridge
+        let (event_sink, event_rx) = mpsc::unbounded::<Vec<u8>>();
+
+        // Schedule PCR stream registration on the CDC endpoint
+        let task = Task::StartPcrStream {
+            region_id,
+            start_ts,
+            event_sink,
+            event_buffer_size: self.event_buffer_size,
+            event_flush_interval_ms: self.event_flush_interval_ms,
+        };
+
+        if let Err(e) = self.scheduler.schedule(task) {
+            error!("PCR: failed to schedule StartPcrStream"; "region_id" => region_id, "error" => ?e);
+            return;
+        }
+
+        // Bridge task: snapshot scan (if first subscribe) → CDC incremental.
+        // Spawned on shared tokio runtime instead of per-Region std::thread.
+        let data_dir = self.data_dir.clone();
+        let pcr_resolved_ts = self.pcr_resolved_ts.clone();
+        let scan_start_key = partition.get_start_key().to_vec();
+        let scan_end_key = partition.get_end_key().to_vec();
+        let bridge_rt = self.bridge_runtime.clone();
+        bridge_rt.spawn(async move {
+            let mut rx = event_rx;
+            let mut sink = sink;
+
+            // Phase 1: Snapshot scan.
+            // - start_ts == 0: initial full scan (new subscription)
+            // - start_ts > 0:  resume-from-checkpoint scan (resend all data,
+            //   consumer SST overwrite handles dedup; TODO: optimize to write-CF
+            //   delta scan filtered by start_ts)
+            // spawn_blocking because RocksDB secondary instance I/O is synchronous.
+            if let Some(ref dd) = data_dir {
+                let db_path = std::path::Path::new(dd).join("db");
+                    let scan_kvs: Vec<(Vec<u8>, Vec<u8>)> = match tokio::task::spawn_blocking(
+                        move || {
+                            crate::pcr_snapshot::SnapshotScanner::open(&db_path)
+                                .map(|s| s.scan(&scan_start_key, &scan_end_key, usize::MAX))
+                        }
+                    ).await {
+                        Ok(Ok(kvs)) => kvs,
+                        _ => Vec::new(),
+                    };
+                    if !scan_kvs.is_empty() {
+                        info!("PCR: snapshot scan region={} kvs={}", region_id, scan_kvs.len());
+                        let mut sent_bytes: u64 = 0;
+                        for chunk in scan_kvs.chunks(100) {
+                            let mut batch = PcrKvBatch::new();
+                            for (k, v) in chunk {
+                                let mut kv = PcrKv::new();
+                                kv.set_key(k.clone()); kv.set_value(v.clone());
+                                kv.set_op(OpType::Put); kv.set_cf("default".to_string());
+                                batch.mut_kvs().push(kv);
+                            }
+                            let mut event = PcrEvent::new();
+                            event.set_kv_batch(batch);
+                            event.set_is_snapshot(true);
+                            let event_bytes = event.compute_size() as u64;
+                            if sink.send((event, WriteFlags::default())).await.is_err() { return; }
+                            sent_bytes += event_bytes;
+                        }
+                        STREAM_INGEST_METRICS.bridge_bytes_sent.inc_by(sent_bytes);
+                        STREAM_INGEST_METRICS.snapshot_regions_scanned.inc();
+                    }
+
+                    // Checkpoint after snapshot
+                    let mut resolved_ts = 0u64;
+                    for _ in 0..20 {
+                        resolved_ts = pcr_resolved_ts.load(Ordering::Acquire);
+                        if resolved_ts > 0 { break; }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    if resolved_ts > 0 {
+                        let mut cp_event = PcrEvent::new();
+                        let mut cp = PcrCheckpoint::new();
+                        cp.set_resolved_ts(resolved_ts);
+                        cp.mut_region_ids().push(region_id);
+                        cp_event.set_checkpoint(cp);
+                        if sink.send((cp_event, WriteFlags::default())).await.is_err() { return; }
+                    }
+                }
+
+            // Phase 2: CDC incremental events with periodic checkpoints.
+            // Uses tokio::select! to wake up on events OR a 5s timer for checkpoints.
+            let mut cp_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    _ = cp_interval.tick() => {
+                        let resolved_ts = pcr_resolved_ts.load(Ordering::Acquire);
+                        if resolved_ts > 0 {
+                            let mut cp_event = PcrEvent::new();
+                            let mut cp = PcrCheckpoint::new();
+                            cp.set_resolved_ts(resolved_ts);
+                            cp.mut_region_ids().push(region_id);
+                            cp_event.set_checkpoint(cp);
+                            if sink.send((cp_event, WriteFlags::default())).await.is_err() { break; }
+                        }
+                    }
+                    event = rx.next() => {
+                        match event {
+                            Some(data) => {
+                                let data_len = data.len() as u64;
+                                if let Ok(event) = protobuf::parse_from_bytes::<PcrEvent>(&data) {
+                                    if sink.send((event, WriteFlags::default())).await.is_err() { break; }
+                                }
+                                STREAM_INGEST_METRICS.bridge_bytes_sent.inc_by(data_len);
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Create a gRPC Service for PCR subscription.
+pub fn create_pcr_stream_service(service: Service) -> grpcio::Service {
+    stream_ingest::pcrpb_grpc::create_pcr_stream(service)
+}

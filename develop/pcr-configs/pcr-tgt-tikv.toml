@@ -1,0 +1,21 @@
+[server]
+addr = "127.0.0.1:30161"
+status-addr = "127.0.0.1:40186"
+advertise-addr = "127.0.0.1:30161"
+
+[storage]
+data-dir = "/tmp/pcr-tgt-data"
+reserve-space = "0GB"
+
+[rocksdb]
+max-open-files = 256
+
+[raftstore]
+raftdb-path = "/tmp/pcr-tgt-data/raft"
+
+[pd]
+endpoints = ["127.0.0.1:3380"]
+
+[stream-ingest]
+enable = true
+source-address = "127.0.0.1:30162"

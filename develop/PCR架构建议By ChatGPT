@@ -1,0 +1,497 @@
+从“Cockroach PCR 设计理念 + TiKV 当前实现现实 + 最小侵入迁移”三个维度来看：
+
+> 更合理、更容易落地的方案是：
+>
+> **源集群：raft-v1**
+> **目标集群：raft-v1**
+>
+> 即：
+>
+> # 第一阶段：双端统一 raft-v1
+>
+> 后续如果 PCR 稳定，再逐步演进到：
+>
+> # 第二阶段：目标集群 raft-v2（仅 follower pipeline）
+
+你现在如果一开始就做：
+
+* 源 raft-v1
+* 目标 raft-v2
+
+理论上“架构更先进”，但工程复杂度会明显上升，而且会踩到 TiKV/TiCDC 当前大量隐藏假设。
+
+下面我展开分析。
+
+---
+
+# 一、Cockroach PCR 的核心本质
+
+Cockroach PCR（Physical Cluster Replication）本质：
+
+不是 SQL CDC；
+不是逻辑 replication；
+
+而是：
+
+> “基于 raft log / replicated state machine 的物理复制”
+
+其核心设计点：
+
+---
+
+## 1. 复制的是 KV 物理状态变化
+
+不是：
+
+* SQL
+* MVCC logical event
+* CDC row change
+
+而是：
+
+* SST
+* Raft entry
+* replicated KV mutation
+
+所以：
+
+PCR 本质更接近：
+
+* learner replication
+* async raft shipping
+* remote follower cluster
+
+---
+
+## 2. 目标集群逻辑上是“远程 follower”
+
+Cockroach PCR 实际理念：
+
+> target cluster ≈ async follower universe
+
+即：
+
+* source cluster 才是真 raft owner
+* target cluster 不参与 quorum
+* target cluster 只 replay replicated raft state
+
+这非常关键。
+
+---
+
+## 3. PCR 的重点在：
+
+不是 raft protocol 本身；
+
+而是：
+
+# “如何安全 replay raft state”
+
+包括：
+
+* applied index
+* truncated index
+* snapshot
+* lease state
+* MVCC GC
+* resolved frontier
+
+---
+
+# 二、TiKV 的现实：raft-v1 才是“真实稳定面”
+
+虽然：
+
+* raft-engine
+* async-io
+* raftstore-v2
+
+已经存在；
+
+但：
+
+# TiKV V8.5 真正成熟稳定的大规模生产路径，仍然是 raft-v1
+
+尤其：
+
+* region lifecycle
+* snapshot ingest
+* peer FSM
+* apply FSM
+* CDC hook
+* resolved-ts
+* learner
+* hibernate-region
+
+大量逻辑仍然围绕 raft-v1 的模型。
+
+---
+
+# 三、为什么“源 v1 + 目标 v2”会很难
+
+这是关键。
+
+你现在的问题：
+
+不是：
+
+“v2 能不能跑”
+
+而是：
+
+# “PCR 的 replay 模型与 v2 的边界是否天然兼容”
+
+答案：
+
+> 兼容性其实不自然。
+
+---
+
+# 四、raftstore-v2 的核心变化
+
+raft-v2 最大变化：
+
+不是协议；
+
+而是：
+
+# “region 生命周期管理”
+
+它：
+
+* 去掉大量 FSM
+* 强化 async poll
+* peer 更轻
+* apply pipeline 重构
+* 强化 store-level scheduler
+
+这是：
+
+# “执行架构变化”
+
+而不是：
+
+# “raft log format 变化”
+
+问题在于：
+
+PCR 恰恰高度依赖：
+
+* apply 顺序
+* snapshot 边界
+* truncated state
+* apply state machine
+
+---
+
+# 五、PCR 最怕“状态机不等价”
+
+如果：
+
+source=v1
+target=v2
+
+那么：
+
+你实际上在做：
+
+# “跨 raftstore runtime 的状态复制”
+
+而不是：
+
+# “纯 raft replication”
+
+这会出现大量隐含问题。
+
+---
+
+# 六、最危险的几个点
+
+---
+
+## 1. apply pipeline 不同
+
+v1：
+
+* apply FSM 顺序明确
+* ready/apply 边界稳定
+
+v2：
+
+* pipeline 更异步
+* apply batching 更激进
+
+那么：
+
+PCR replay 时：
+
+可能出现：
+
+* apply index 可见性差异
+* resolved-ts 不一致
+* ingest snapshot timing 不一致
+
+---
+
+## 2. snapshot 生命周期不同
+
+PCR 必然大量依赖：
+
+* snapshot bootstrap
+* SST ingest
+
+而：
+
+raft-v2：
+
+对 snapshot scheduling 改动很大。
+
+你会碰到：
+
+* snapshot overlap
+* async apply snapshot
+* peer create timing
+
+问题。
+
+---
+
+## 3. region destroy/create 时序
+
+PCR 会高频遇到：
+
+* split
+* merge
+* destroy peer
+* recreate peer
+
+而：
+
+v2 对 peer lifecycle 管理和 v1 差异极大。
+
+这类问题：
+
+最容易导致：
+
+* zombie peer
+* stale apply
+* replay hole
+
+---
+
+## 4. CDC/resolved-ts 假设
+
+TiCDC 当前很多实现：
+
+默认：
+
+* raft-v1 apply order
+* region observe model
+
+PCR 若复用 TiCDC hook：
+
+目标 v2 会踩很多边界。
+
+---
+
+# 七、为什么“双 v1”更合理
+
+因为：
+
+# PCR 第一阶段目标不是“先进”
+
+而是：
+
+# “证明物理复制正确性”
+
+而：
+
+双 v1：
+
+意味着：
+
+* apply 语义一致
+* peer lifecycle 一致
+* snapshot 行为一致
+* GC 行为一致
+* raft log truncate 行为一致
+
+这样：
+
+你只需要解决：
+
+# “异步 remote replay”
+
+而不是：
+
+# “两个 raft runtime 的兼容”
+
+---
+
+# 八、Cockroach PCR 本身也是“最小差异原则”
+
+Cockroach PCR 的设计哲学：
+
+其实就是：
+
+# target cluster 尽量像 remote follower
+
+即：
+
+* state machine 一致
+* raft behavior 一致
+* storage engine 一致
+
+它并没有：
+
+“故意做不同 runtime”。
+
+---
+
+# 九、推荐的落地路线（非常关键）
+
+这是我认为最现实的路径。
+
+---
+
+# Phase 1（建议）
+
+## source: raft-v1
+
+## target: raft-v1
+
+实现：
+
+* raft log shipping
+* snapshot bootstrap
+* async apply
+* remote resolved-ts
+* failover promotion
+
+先跑通：
+
+# “最小 PCR”
+
+这是成功率最高的。
+
+---
+
+# Phase 2
+
+在目标集群引入：
+
+* raft-engine pipeline
+* apply async optimize
+
+但：
+
+# 保持 v1 state machine
+
+即：
+
+只优化 replay。
+
+---
+
+# Phase 3（最后）
+
+才尝试：
+
+# target raftstore-v2
+
+并且：
+
+建议：
+
+## “只做 follower replay mode”
+
+即：
+
+target peer：
+
+* 不参与 election
+* 不参与 proposal
+* 不参与 scheduler
+
+仅：
+
+* apply replicated raft state
+
+这样：
+
+才能避免 v2 生命周期复杂度。
+
+---
+
+# 十、一个非常重要的现实问题
+
+你现在如果直接：
+
+source=v1
+target=v2
+
+后面你会发现：
+
+> 80% 时间不是在做 PCR，
+> 而是在修 v1/v2 生命周期兼容 bug。
+
+包括：
+
+* split race
+* snapshot race
+* stale peer
+* apply reorder
+* resolved-ts hole
+
+最终：
+
+PCR 本身反而不是主要工作。
+
+---
+
+# 十一、最终建议（明确结论）
+
+# 当前最合理方案
+
+## 源集群：raft-v1
+
+## 目标集群：raft-v1
+
+原因：
+
+* 状态机语义一致
+* 生命周期一致
+* snapshot 行为一致
+* 更容易验证 correctness
+* 更容易复用 TiCDC / raftstore 现有逻辑
+* 更容易定位 PCR 问题
+
+这是：
+
+# “工程上最稳的第一阶段方案”
+
+---
+
+# 长期演进方案
+
+未来：
+
+可以：
+
+## 源：v1
+
+## 目标：v2 replay-only
+
+但：
+
+必须等：
+
+* PCR 正确性稳定
+* snapshot protocol 固化
+* replay boundary 清晰
+
+之后再做。
+
+否则：
+
+复杂度会指数级上升。

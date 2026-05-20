@@ -1,0 +1,14 @@
+# PCR 独立 Prometheus — scrape source + target TiKV
+# 启动: prometheus --config.file=prometheus-pcr.yml --web.listen-address=":9091"
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "tikv-src"
+    static_configs:
+      - targets: ["127.0.0.1:40185"]
+  - job_name: "tikv-tgt"
+    static_configs:
+      - targets: ["127.0.0.1:40186"]

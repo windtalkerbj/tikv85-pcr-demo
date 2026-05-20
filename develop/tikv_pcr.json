@@ -1,0 +1,1268 @@
+{
+  "title": "TiKV PCR",
+  "uid": "tikv-pcr",
+  "refresh": "5s",
+  "schemaVersion": 27,
+  "panels": [
+    {
+      "id": 10,
+      "type": "row",
+      "title": "PCR Overview",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Producer (Source)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "panels": []
+    },
+    {
+      "id": 31,
+      "type": "stat",
+      "title": "Bridge Bytes Sent",
+      "gridPos": {
+        "h": 2,
+        "w": 4,
+        "x": 0,
+        "y": 6
+      },
+      "targets": [
+        {
+          "expr": "pcr_bridge_bytes_sent_total{instance=\"127.0.0.1:40185\"}",
+          "datasource": "mac_tidb"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "decbytes"
+        },
+        "overrides": []
+      },
+      "valueFontSize": "120%"
+    },
+    {
+      "id": 32,
+      "type": "stat",
+      "title": "Snapshot Regions",
+      "gridPos": {
+        "h": 2,
+        "w": 4,
+        "x": 4,
+        "y": 6
+      },
+      "targets": [
+        {
+          "expr": "pcr_snapshot_regions_scanned{instance=\"127.0.0.1:40185\"}",
+          "datasource": "mac_tidb"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "valueFontSize": "120%"
+    },
+    {
+      "id": 33,
+      "type": "stat",
+      "title": "Src Batcher Bytes",
+      "gridPos": {
+        "h": 2,
+        "w": 4,
+        "x": 8,
+        "y": 6
+      },
+      "targets": [
+        {
+          "expr": "pcr_source_batcher_bytes{instance=\"127.0.0.1:40185\"}",
+          "datasource": "mac_tidb"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "decbytes"
+        },
+        "overrides": []
+      },
+      "valueFontSize": "120%"
+    },
+    {
+      "id": 34,
+      "type": "stat",
+      "title": "CDC Events Generated",
+      "gridPos": {
+        "h": 2,
+        "w": 4,
+        "x": 12,
+        "y": 6
+      },
+      "targets": [
+        {
+          "expr": "pcr_cdc_events_generated_total{instance=\"127.0.0.1:40185\"}",
+          "datasource": "mac_tidb"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "valueFontSize": "120%"
+    },
+    {
+      "id": 35,
+      "type": "graph",
+      "title": "Bridge Throughput (bytes/s)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "rate(pcr_bridge_bytes_sent_total{instance=\"127.0.0.1:40185\"}[2m])",
+          "datasource": "mac_tidb",
+          "legendFormat": "bytes/s",
+          "refId": "A"
+        }
+      ],
+      "legend": {
+        "show": true,
+        "alignAsTable": true,
+        "avg": true,
+        "current": true,
+        "max": true
+      },
+      "yaxes": [
+        {
+          "format": "Bps",
+          "show": true
+        },
+        {
+          "format": "short",
+          "show": true
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "type": "graph",
+      "title": "CDC Events Rate (/s)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "rate(pcr_cdc_events_generated_total{instance=\"127.0.0.1:40185\"}[1m])",
+          "datasource": "mac_tidb",
+          "legendFormat": "events/s",
+          "refId": "A"
+        }
+      ],
+      "legend": {
+        "show": true,
+        "alignAsTable": true,
+        "avg": true,
+        "current": true,
+        "max": true
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true
+        },
+        {
+          "format": "short",
+          "show": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "singlestat",
+      "title": "State",
+      "gridPos": {
+        "h": 2,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "pcr_state{instance=\"127.0.0.1:20180\"}",
+          "datasource": "mac_tidb",
+          "legendFormat": ""
+        }
+      ],
+      "valueFontSize": "100%",
+      "valueName": "current",
+      "mappingType": 1,
+      "valueMaps": [
+        {
+          "value": "0",
+          "text": "Idle"
+        },
+        {
+          "value": "1",
+          "text": "Subscribing"
+        },
+        {
+          "value": "2",
+          "text": "Paused"
+        },
+        {
+          "value": "3",
+          "text": "CuttingOver"
+        },
+        {
+          "value": "4",
+          "text": "Completed"
+        },
+        {
+          "value": "5",
+          "text": "Activated"
+        },
+        {
+          "value": "6",
+          "text": "Failed"
+        }
+      ],
+      "colors": [
+        "#299c46",
+        "rgba(237,129,40,0.89)",
+        "#d44a3a"
+      ],
+      "thresholds": "0,3,6",
+      "sparkline": {
+        "show": false,
+        "full": false
+      },
+      "gauge": {
+        "show": false
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Lag (s)",
+      "gridPos": {
+        "h": 2,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "pcr_checkpoint_lag_seconds{instance=\"127.0.0.1:20180\"}",
+          "datasource": "mac_tidb"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 60
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "valueFontSize": "120%"
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Active Regions",
+      "gridPos": {
+        "h": 2,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "pcr_active_subscriptions{instance=\"127.0.0.1:20180\"}",
+          "datasource": "mac_tidb"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "valueFontSize": "120%"
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Ingested KVs",
+      "gridPos": {
+        "h": 2,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "pcr_ingested_kvs_total{instance=\"127.0.0.1:20180\"}",
+          "datasource": "mac_tidb"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "valueFontSize": "120%"
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Ingested MB",
+      "gridPos": {
+        "h": 2,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "pcr_ingested_bytes_total{instance=\"127.0.0.1:20180\"} / 1048576",
+          "datasource": "mac_tidb"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "valueFontSize": "120%"
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Flush Count",
+      "gridPos": {
+        "h": 2,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "pcr_flush_count_total{instance=\"127.0.0.1:20180\"}",
+          "datasource": "mac_tidb"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "valueFontSize": "120%"
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Throughput & Latency",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "graph",
+      "title": "Throughput (bytes/s)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "rate(pcr_ingested_bytes_total{instance=\"127.0.0.1:20180\"}[2m])",
+          "datasource": "mac_tidb",
+          "legendFormat": "bytes/s",
+          "refId": "A"
+        }
+      ],
+      "legend": {
+        "show": true,
+        "alignAsTable": true,
+        "avg": true,
+        "current": true,
+        "max": true
+      },
+      "yaxes": [
+        {
+          "format": "Bps",
+          "show": true
+        },
+        {
+          "format": "short",
+          "show": true
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "graph",
+      "title": "KV Rate (KVs/s)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "rate(pcr_ingested_kvs_total{instance=\"127.0.0.1:20180\"}[1m])",
+          "datasource": "mac_tidb",
+          "legendFormat": "KVs/s",
+          "refId": "A"
+        }
+      ],
+      "legend": {
+        "show": true,
+        "alignAsTable": true,
+        "avg": true,
+        "current": true,
+        "max": true
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true
+        },
+        {
+          "format": "short",
+          "show": true
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "graph",
+      "title": "Replication Lag (s)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "pcr_checkpoint_lag_seconds{instance=\"127.0.0.1:20180\"}",
+          "datasource": "mac_tidb",
+          "legendFormat": "lag",
+          "refId": "A"
+        }
+      ],
+      "legend": {
+        "show": true,
+        "alignAsTable": true,
+        "avg": true,
+        "current": true,
+        "max": true
+      },
+      "yaxes": [
+        {
+          "format": "s",
+          "show": true
+        },
+        {
+          "format": "short",
+          "show": true
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "graph",
+      "title": "Flush Latency (P50/P95/P99)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(pcr_flush_latency_seconds_bucket{instance=\"127.0.0.1:20180\"}[1m]))",
+          "datasource": "mac_tidb",
+          "legendFormat": "P50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(pcr_flush_latency_seconds_bucket{instance=\"127.0.0.1:20180\"}[1m]))",
+          "datasource": "mac_tidb",
+          "legendFormat": "P95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(pcr_flush_latency_seconds_bucket{instance=\"127.0.0.1:20180\"}[1m]))",
+          "datasource": "mac_tidb",
+          "legendFormat": "P99",
+          "refId": "C"
+        }
+      ],
+      "legend": {
+        "show": true,
+        "alignAsTable": true,
+        "avg": true,
+        "current": true,
+        "max": true
+      },
+      "yaxes": [
+        {
+          "format": "s",
+          "show": true
+        },
+        {
+          "format": "short",
+          "show": true
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "graph",
+      "title": "Flush & SST Rate (/s)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "rate(pcr_flush_count_total{instance=\"127.0.0.1:20180\"}[1m])",
+          "datasource": "mac_tidb",
+          "legendFormat": "flushes/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(pcr_ingested_ssts_total{instance=\"127.0.0.1:20180\"}[1m])",
+          "datasource": "mac_tidb",
+          "legendFormat": "SSTs/s",
+          "refId": "B"
+        }
+      ],
+      "legend": {
+        "show": true,
+        "alignAsTable": true,
+        "avg": true,
+        "current": true,
+        "max": true
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true
+        },
+        {
+          "format": "short",
+          "show": true
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "graph",
+      "title": "Buffer Size (bytes)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "pcr_buffer_size_bytes{instance=\"127.0.0.1:20180\"}",
+          "datasource": "mac_tidb",
+          "legendFormat": "buffer",
+          "refId": "A"
+        }
+      ],
+      "legend": {
+        "show": true,
+        "alignAsTable": true,
+        "avg": true,
+        "current": true,
+        "max": true
+      },
+      "yaxes": [
+        {
+          "format": "decbytes",
+          "show": true
+        },
+        {
+          "format": "short",
+          "show": true
+        }
+      ]
+    },
+    {
+      "id": 37,
+      "type": "singlestat",
+      "title": "Cutover Progress",
+      "gridPos": {
+        "h": 2,
+        "w": 4,
+        "x": 16,
+        "y": 6
+      },
+      "targets": [
+        {
+          "expr": "pcr_cutover_progress{instance=\"127.0.0.1:20180\"}",
+          "datasource": "mac_tidb"
+        }
+      ],
+      "valueName": "current",
+      "valueFontSize": "100%",
+      "mappingType": 1,
+      "valueMaps": [
+        {
+          "value": "0",
+          "text": "N/A"
+        },
+        {
+          "value": "100",
+          "text": "READY"
+        }
+      ],
+      "sparkline": {
+        "show": true,
+        "full": false
+      },
+      "gauge": {
+        "show": true,
+        "minValue": 0,
+        "maxValue": 100
+      },
+      "colors": [
+        "#299c46",
+        "rgba(237,129,40,0.89)",
+        "#d44a3a"
+      ],
+      "thresholds": "50,90"
+    },
+    {
+      "id": 40,
+      "type": "graph",
+      "title": "Top-5 Slowest Regions Lag",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "topk(5, pcr_region_lag_seconds{instance=\"127.0.0.1:20180\"})",
+          "datasource": "mac_tidb",
+          "legendFormat": "region {{region_id}}",
+          "refId": "A"
+        }
+      ],
+      "legend": {
+        "show": true,
+        "alignAsTable": true,
+        "avg": true,
+        "current": true,
+        "max": true
+      },
+      "yaxes": [
+        {
+          "format": "s",
+          "show": true
+        },
+        {
+          "format": "short",
+          "show": true
+        }
+      ],
+      "tooltip": {
+        "shared": true,
+        "value_type": "individual"
+      }
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "P0: Health & Errors",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "panels": []
+    },
+    {
+      "id": 51,
+      "type": "graph",
+      "title": "Errors by Type (/s)",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 53
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "rate(pcr_errors_total{instance=\"127.0.0.1:20180\", type=\"disconnect\"}[2m])",
+          "datasource": "mac_tidb",
+          "legendFormat": "disconnect",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(pcr_errors_total{instance=\"127.0.0.1:20180\", type=\"epoch\"}[2m])",
+          "datasource": "mac_tidb",
+          "legendFormat": "epoch",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(pcr_errors_total{instance=\"127.0.0.1:20180\", type=\"ingest\"}[2m])",
+          "datasource": "mac_tidb",
+          "legendFormat": "ingest",
+          "refId": "C"
+        },
+        {
+          "expr": "rate(pcr_errors_total{instance=\"127.0.0.1:20180\", type=\"subscription\"}[2m])",
+          "datasource": "mac_tidb",
+          "legendFormat": "subscription",
+          "refId": "D"
+        }
+      ],
+      "legend": {
+        "show": true,
+        "alignAsTable": true
+      },
+      "yaxes": [
+        {
+          "format": "short"
+        },
+        {
+          "format": "short"
+        }
+      ]
+    },
+    {
+      "id": 52,
+      "type": "graph",
+      "title": "Reconnects by Region (top-5)",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 53
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "topk(5, rate(pcr_subscriber_reconnects_total{instance=\"127.0.0.1:20180\"}[2m]))",
+          "datasource": "mac_tidb",
+          "legendFormat": "region {{region_id}}",
+          "refId": "A"
+        }
+      ],
+      "legend": {
+        "show": true,
+        "alignAsTable": true
+      },
+      "yaxes": [
+        {
+          "format": "short"
+        },
+        {
+          "format": "short"
+        }
+      ]
+    },
+    {
+      "id": 53,
+      "type": "graph",
+      "title": "Bridge Liveness (max, per region)",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 53
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "topk(5, pcr_bridge_liveness_seconds{instance=\"127.0.0.1:20180\"})",
+          "datasource": "mac_tidb",
+          "legendFormat": "region {{region_id}}",
+          "refId": "A"
+        }
+      ],
+      "legend": {
+        "show": true,
+        "alignAsTable": true
+      },
+      "yaxes": [
+        {
+          "format": "s"
+        },
+        {
+          "format": "short"
+        }
+      ]
+    },
+    {
+      "id": 60,
+      "type": "row",
+      "title": "P1: Latency & CF Breakdown",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 62
+      },
+      "panels": []
+    },
+    {
+      "id": 61,
+      "type": "graph",
+      "title": "Dispatch Latency (P50/P95/P99)",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 63
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50,rate(pcr_dispatch_latency_seconds_bucket{instance=\"127.0.0.1:20180\"}[2m]))",
+          "datasource": "mac_tidb",
+          "legendFormat": "P50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95,rate(pcr_dispatch_latency_seconds_bucket{instance=\"127.0.0.1:20180\"}[2m]))",
+          "datasource": "mac_tidb",
+          "legendFormat": "P95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99,rate(pcr_dispatch_latency_seconds_bucket{instance=\"127.0.0.1:20180\"}[2m]))",
+          "datasource": "mac_tidb",
+          "legendFormat": "P99",
+          "refId": "C"
+        }
+      ],
+      "legend": {
+        "show": true
+      },
+      "yaxes": [
+        {
+          "format": "s"
+        },
+        {
+          "format": "short"
+        }
+      ]
+    },
+    {
+      "id": 62,
+      "type": "graph",
+      "title": "SST Phased Latency (P50)",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 63
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50,rate(pcr_sst_sort_latency_seconds_bucket{instance=\"127.0.0.1:20180\"}[2m]))",
+          "datasource": "mac_tidb",
+          "legendFormat": "sort",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50,rate(pcr_sst_generate_latency_seconds_bucket{instance=\"127.0.0.1:20180\"}[2m]))",
+          "datasource": "mac_tidb",
+          "legendFormat": "generate",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.50,rate(pcr_sst_ingest_latency_seconds_bucket{instance=\"127.0.0.1:20180\"}[2m]))",
+          "datasource": "mac_tidb",
+          "legendFormat": "ingest",
+          "refId": "C"
+        }
+      ],
+      "legend": {
+        "show": true
+      },
+      "yaxes": [
+        {
+          "format": "s"
+        },
+        {
+          "format": "short"
+        }
+      ]
+    },
+    {
+      "id": 63,
+      "type": "graph",
+      "title": "Ingest Bytes by CF",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 63
+      },
+      "fill": 1,
+      "lines": true,
+      "targets": [
+        {
+          "expr": "rate(pcr_cf_ingested_bytes_total{instance=\"127.0.0.1:20180\",cf=\"default\"}[2m])",
+          "datasource": "mac_tidb",
+          "legendFormat": "default",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(pcr_cf_ingested_bytes_total{instance=\"127.0.0.1:20180\",cf=\"write\"}[2m])",
+          "datasource": "mac_tidb",
+          "legendFormat": "write",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(pcr_cf_ingested_bytes_total{instance=\"127.0.0.1:20180\",cf=\"lock\"}[2m])",
+          "datasource": "mac_tidb",
+          "legendFormat": "lock",
+          "refId": "C"
+        }
+      ],
+      "legend": {
+        "show": true
+      },
+      "yaxes": [
+        {
+          "format": "Bps"
+        },
+        {
+          "format": "short"
+        }
+      ]
+    },
+    {
+      "id": 99,
+      "type": "stat",
+      "title": "SQL Consistency",
+      "gridPos": {
+        "h": 2,
+        "w": 4,
+        "x": 16,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "pcr_sql_consistency{instance=~\"127.0.0.1:4018[56]\"}",
+          "datasource": "Prometheus"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "fieldOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "value": "1",
+              "text": "\u2713 Consistent"
+            },
+            {
+              "type": "value",
+              "value": "0",
+              "text": "\u2717 Mismatch"
+            },
+            {
+              "type": "value",
+              "value": "-1",
+              "text": "Not Run"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  }
+}

@@ -1,0 +1,20 @@
+[package]
+name = "pcr-ctl"
+version = "0.1.0"
+edition = "2021"
+description = "CLI tool for managing TiKV Physical Cluster Replication (PCR)"
+
+# Standalone — not part of TiKV workspace
+[workspace]
+
+[[bin]]
+name = "pcr-ctl"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+reqwest = { version = "0.11", features = ["json"] }
