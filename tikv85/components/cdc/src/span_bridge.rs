@@ -76,10 +76,11 @@ impl SpanBridge {
         mut sink: ServerStreamingSink<PcrEvent>,
     ) {
         info!("PCR span_bridge: run() entered, resolving regions...");
-        // Unbounded merge channel: streaming scan O(1MB) eliminates OOM risk.
-        // block_send can be used freely; the gRPC writer drains at its own pace.
+        // Bounded merge channel: 32 slots × ~1MB = 32MB max buffered.
+        // Backpressure: when gRPC writer is slow, scan tasks block on send(),
+        // throttling the RocksDB scan to match consumer ingest rate.
         let (merge_tx, mut merge_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Vec<PcrEvent>>();
+            tokio::sync::mpsc::channel::<Vec<PcrEvent>>(32);
 
         // Shared sink for delegates (futures channel) → relay → merge_tx.
         let (fut_tx, mut fut_rx) =
@@ -118,7 +119,7 @@ impl SpanBridge {
                 }
                 if !buf.is_empty() {
                     let batch = std::mem::take(&mut buf);
-                    if relay_tx.send(batch).is_err() { break; }
+                    if relay_tx.send(batch).await.is_err() { break; }
                 }
             }
         });
@@ -190,73 +191,74 @@ impl SpanBridge {
         }
     }
 
-    /// Scan one region via verified pcr_snapshot functions, chunk by bytes.
-    /// Uses the same RocksDB scan path as the materialized version (verified
-    /// correct for 1-warehouse) but groups KVs by byte count instead of fixed
-    /// 100-KV chunks, reducing channel send overhead.
+    /// Stream scan: uses pcr_snapshot::stream_cf_full (same RocksSnapshot/iterator
+    /// logic as scan_default_cf) with a callback that builds PcrKv batches by
+    /// byte count. Memory is O(BATCH_BYTES) — no full region materialization.
     async fn scan_region(
         region_id: u64,
         is_full: bool,
         start_ts: u64,
         source_engine: Arc<engine_rocks::RocksEngine>,
-        out_tx: tokio::sync::mpsc::UnboundedSender<Vec<PcrEvent>>,
+        out_tx: tokio::sync::mpsc::Sender<Vec<PcrEvent>>,
     ) {
-        let engine = source_engine.clone();
-        let (entries, total) = tokio::task::spawn_blocking(move || {
-            let empty: &[u8] = &[];
-            let mut kvs: Vec<(Vec<u8>, Vec<u8>, OpType, &str)> = Vec::new();
-            if is_full {
-                let dk = crate::pcr_snapshot::scan_default_cf(&engine, empty, empty, usize::MAX);
-                let wk = crate::pcr_snapshot::scan_write_cf_raw(&engine, empty, empty, usize::MAX);
-                for (k, v) in &dk { kvs.push((k.clone(), v.clone(), OpType::Put, "default")); }
-                for (k, v) in &wk { kvs.push((k.clone(), v.clone(), OpType::Put, "write")); }
-            } else {
-                let (wr, dr) = crate::pcr_snapshot::scan_delta_entries(&engine, start_ts, empty, empty);
-                for (k, v) in &wr { kvs.push((k.clone(), v.clone(), OpType::Put, "write")); }
-                for (k, v, op) in &dr { kvs.push((k.clone(), v.clone(), *op, "default")); }
-            }
-            let total = kvs.len() as u64;
-            (kvs, total)
-        }).await.unwrap_or_default();
+        tokio::task::spawn_blocking(move || {
+            let engine = &source_engine;
+            let mut batch_kvs: Vec<PcrKv> = Vec::with_capacity(4096);
+            let mut batch_bytes: usize = 0;
+            let mut total: u64 = 0;
+            let mut sent_batches: u64 = 0;
 
-        // Send in byte-based batches to reduce channel/grpc overhead
-        let mut batch_kvs: Vec<PcrKv> = Vec::with_capacity(4096);
-        let mut batch_bytes: usize = 0;
-        for (k, v, op, cf) in entries {
-            let mut kv = PcrKv::new();
-            kv.set_key(k);
-            kv.set_value(v);
-            kv.set_op(op);
-            kv.set_cf(cf.to_string());
-            batch_bytes += kv.get_key().len() + kv.get_value().len();
-            batch_kvs.push(kv);
-
-            if batch_bytes >= BATCH_BYTES {
-                let mut pcr_batch = PcrKvBatch::new();
-                for kv in batch_kvs.drain(..) {
-                    pcr_batch.mut_kvs().push(kv);
+            let mut maybe_flush = |kvs: &mut Vec<PcrKv>, bytes: &mut usize| {
+                if *bytes >= BATCH_BYTES {
+                    let mut pcr_batch = PcrKvBatch::new();
+                    for kv in kvs.drain(..) { pcr_batch.mut_kvs().push(kv); }
+                    let mut event = PcrEvent::new();
+                    event.set_kv_batch(pcr_batch);
+                    event.set_is_snapshot(true);
+                    let _ = out_tx.blocking_send(vec![event]);
+                    *bytes = 0;
+                    sent_batches += 1;
                 }
+            };
+
+            let mut add_kv = |cf: &str, op: OpType, key: Vec<u8>, value: Vec<u8>| {
+                let entry = key.len() + value.len();
+                let mut kv = PcrKv::new();
+                kv.set_key(key); kv.set_value(value); kv.set_op(op); kv.set_cf(cf.to_string());
+                batch_bytes += entry;
+                total += 1;
+                batch_kvs.push(kv);
+                maybe_flush(&mut batch_kvs, &mut batch_bytes);
+            };
+
+            let (n1, n2);
+            if is_full {
+                n1 = crate::pcr_snapshot::stream_cf_full(engine, "default", OpType::Put, |k, v| add_kv("default", OpType::Put, k, v));
+                n2 = crate::pcr_snapshot::stream_cf_full(engine, "write", OpType::Put, |k, v| add_kv("write", OpType::Put, k, v));
+            } else {
+                n1 = 0; n2 = 0;
+                // Delta: use existing scan_delta_entries (not streaming-critical yet)
+                let (wr, dr) = crate::pcr_snapshot::scan_delta_entries(engine, start_ts, &[], &[]);
+                for (k, v) in &wr { add_kv("write", OpType::Put, k.clone(), v.clone()); }
+                for (k, v, op) in &dr { add_kv("default", *op, k.clone(), v.clone()); }
+            }
+            // Drain residual
+            if !batch_kvs.is_empty() {
+                let mut pcr_batch = PcrKvBatch::new();
+                for kv in batch_kvs.drain(..) { pcr_batch.mut_kvs().push(kv); }
                 let mut event = PcrEvent::new();
                 event.set_kv_batch(pcr_batch);
                 event.set_is_snapshot(true);
-                let _ = out_tx.send(vec![event]);
-                batch_bytes = 0;
+                let _ = out_tx.blocking_send(vec![event]);
+                sent_batches += 1;
             }
-        }
-        // Drain residual
-        if !batch_kvs.is_empty() {
-            let mut pcr_batch = PcrKvBatch::new();
-            for kv in batch_kvs.drain(..) {
-                pcr_batch.mut_kvs().push(kv);
-            }
-            let mut event = PcrEvent::new();
-            event.set_kv_batch(pcr_batch);
-            event.set_is_snapshot(true);
-            let _ = out_tx.send(vec![event]);
-        }
 
-        info!("PCR span_bridge: scan complete";
-            "region_id" => region_id, "kvs" => total);
+            let residual = batch_kvs.len();
+            info!("PCR span_bridge: scan complete";
+                "region_id" => region_id, "kvs" => total,
+                "cf_default" => n1, "cf_write" => n2,
+                "batches_sent" => sent_batches);
+        }).await.unwrap_or_default();
     }
 
     /// Static version of resolve_regions for use in spawned tasks.

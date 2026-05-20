@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(kill *)",
+      "Bash(pkill *)",
+      "Bash(cargo build *)"
+    ]
+  },
+  "env": {
+    "MEM0_API_KEY": "m0-1b5tKpDHUSJjjMuYy3WhoLew6OmSdWIyS4lt2rLY"
+  }
+}

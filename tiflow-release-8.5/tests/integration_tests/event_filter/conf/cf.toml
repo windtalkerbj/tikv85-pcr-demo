@@ -1,0 +1,24 @@
+[filter]
+rules = ["event_filter.*"] # replicate all tables in the event_filter database
+# This event filter rules will apply to table t1 only.
+[[filter.event-filters]]
+matcher = ["event_filter.t1"]
+ignore-event = ["drop table", "delete"]
+ignore-insert-value-expr = "id = 2 or city = 'tokyo'"
+
+# Filter rules for virtual column table
+[[filter.event-filters]]
+matcher = ["event_filter.t_virtual"]
+ignore-insert-value-expr = "id = 2 or category = 'furniture' or is_discounted = true"
+
+[[filter.event-filters]]
+matcher = ["event_filter.t_truncate"]
+ignore-event = ["truncate table"]
+
+[[filter.event-filters]]
+matcher = ["event_filter.t_alter"]
+ignore-event = ["alter table"]
+
+[[filter.event-filters]]
+matcher = ["event_filter.t_name*"]
+ignore-event = ["rename table"]

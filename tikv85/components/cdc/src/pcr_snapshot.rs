@@ -12,8 +12,33 @@ use engine_rocks::RocksEngine;
 use engine_rocks::RocksSnapshot;
 use engine_traits::{IterOptions, Iterable, Iterator as EngineIterator, Peekable};
 use slog_global::info;
-use stream_ingest::pcrpb::OpType;
+use stream_ingest::pcrpb::{OpType, PcrKv, PcrKvBatch, PcrEvent};
 use txn_types::{Key, TimeStamp};
+
+/// Streaming full scan: iterate one CF with the same RocksSnapshot/Iterator
+/// logic as scan_default_cf, but call `on_kv` for each KV instead of
+/// collecting into a Vec. This keeps memory at O(1) per KV.
+pub fn stream_cf_full(
+    engine: &RocksEngine,
+    cf: &str,
+    _op: OpType,
+    mut on_kv: impl FnMut(Vec<u8>, Vec<u8>),
+) -> u64 {
+    let mut count: u64 = 0;
+    let snap = RocksSnapshot::new(engine.get_sync_db());
+    let iter_opt = IterOptions::new(None, None, false);
+    let mut iter = match snap.iterator_opt(cf, iter_opt) {
+        Ok(i) => i,
+        Err(_) => return count,
+    };
+    let _ = iter.seek_to_first();
+    while iter.valid().unwrap_or(false) {
+        on_kv(iter.key().to_vec(), iter.value().to_vec());
+        count += 1;
+        let _ = iter.next();
+    }
+    count
+}
 
 /// Encode a PD region boundary (already in memcomparable format) into a
 /// complete MVCC key for RocksDB iterator bounds.

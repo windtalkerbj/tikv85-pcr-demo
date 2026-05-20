@@ -161,8 +161,14 @@ async fn run_ingest_worker<E: KvEngine>(
 
 impl<E: KvEngine> PcrComponents<E> {
     /// Dispatch data events to per-region ingest workers.
+    /// Uses internal round-robin counter (span mode has region_id=0).
     fn handle_data_event(&mut self, event_with_meta: PcrEventWithMeta) -> Result<()> {
-        let idx = event_with_meta.region_id as usize % self.workers.len();
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let idx = if event_with_meta.region_id != 0 {
+            event_with_meta.region_id as usize % self.workers.len()
+        } else {
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize % self.workers.len()
+        };
         let _ = self.workers[idx].tx.send(event_with_meta);
         Ok(())
     }

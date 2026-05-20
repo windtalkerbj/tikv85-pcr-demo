@@ -1,0 +1,20 @@
+[sink]
+transaction-atomicity = ""
+# Line terminator. Empty value means "\r\n" (CRLF) is line terminators. The default value is empty.
+terminator = "\r\n"
+# Directory date separator, Optional values are `none`, `year`, `month`, `date`. The default value is none.
+date-separator = 'day'
+
+
+[sink.csv]
+# Delimiter between fields. Must be ASCII characters. The default value is ','.
+delimiter = ','
+# Quoting character. Empty value means no quoting. The default value is '"'.
+quote = '"'
+# Representation of null values in CSV files, the default value is '\N'
+null = '\N'
+# Include commit-ts in the row data. The default value is false.
+include-commit-ts = false
+# Ouptut Old Value, for example update statement will be replaced by a pair of delete and insert
+# in the CSV files to output the old value.
+output-old-value = false

@@ -1,0 +1,214 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Repository Purpose
+
+仿照 CockroachDB 物理复制（PCR）功能和实现途径，在 TiKV v8.5 上实现**较全功能的 PCR Demo**（不要求生产上线能力），在常见 corner case 下具备较强健壮性。同时通过对比两个系统的架构设计，深入理解 TiDB/Cockroach 的核心机制。
+
+**学习目标**：
+- TiKV/TiDB 内部架构：raftstore apply、CDC observer、RocksDB MVCC、Percolator 事务
+- CockroachDB 内部架构：rangefeed、leaseholder、tenant keyspace、KeyRewriter
+- 两者对比：Raft 日志复制 vs 直接 SST ingest、CDC observer vs rangefeed、DeleteRange vs UnsafeDestroyRange
+
+**Demo 功能目标**：
+- 全量复制（snapshot scan + WRITE CF）
+- 增量复制（CDC live stream + 断点续传）
+- DDL 复制（CREATE/DROP/TRUNCATE TABLE）
+- Lightning LOCAL import / BR / Analyze / 系统表同步
+- Prometheus + Grafana 可观测性
+- SQL 数据一致性校验
+
+**技能使用指引**：在项目各阶段，除官方 skill 外，积极尝试使用已安装的相关 skill：
+- 需求理解 / 系统设计 → `superpowers:brainstorming`
+- 编码实现 → `superpowers:executing-plans`、`superpowers:subagent-driven-development`
+- 调试 / 问题诊断 → `superpowers:systematic-debugging`
+- 测试设计 / UAT → `superpowers:brainstorming` + test plan 模板
+- CRDB 源码参考 → `superpowers:dispatching-parallel-agents` 并行探索
+- Code review → `superpowers:requesting-code-review`
+
+This is a side-by-side research/comparison repository containing two distributed database source trees:
+- `cockroach24/` — CockroachDB v24.x, a distributed SQL database written in Go
+- `tikv85/` — TiKV v8.5.x, a distributed transactional KV store written in Rust (CNCF graduated)
+
+## CockroachDB (`cockroach24/`)
+
+### Build System
+- **Build tool**: `./dev` (a Bazel wrapper, generated Go binary)
+- **Module**: `github.com/cockroachdb/cockroach` — Go 1.22
+- Useful commands:
+  - `./dev build` — build the `cockroach` binary
+  - `./dev build short` — faster build (race detector off)
+  - `./dev test pkg/<path>...` — run tests for a package
+  - `./dev test pkg/<path>... --test_filter=<TestName>` — run a single test
+  - `./dev bench pkg/<path>...` — run benchmarks
+  - `./dev generate go` — regenerate protobuf/stringer code
+  - `./dev lint` — run linters
+
+### Architecture (key to PCR)
+- **KV layer** (`pkg/kv/`): Distributed transactional KV store, with `kv.DB` as the entry point for reads/writes
+- **Storage engine** (`pkg/storage/`): Pebble (LSM-tree, RocksDB-derived) via the `storage.Engine` interface; provides MVCCKeyValue, SST ingestion
+- **Raft** (`pkg/raft/`): Raft consensus implementation
+- **Range splits** (`pkg/roachpb/`): Data organized into ranges (~512 MiB), each replicated via Raft
+- **CCL (enterprise)** (`pkg/ccl/`): Enterprise features behind license, including PCR
+
+### PCR Implementation (`pkg/ccl/crosscluster/physical/`)
+
+PCR replicates KV byte-level data from a **source (producer)** cluster to a **destination (consumer)** cluster. Key architecture:
+
+1. **Stream client** (`streamclient/`): Connects to the source cluster, subscribes to a replication stream partitioned by key ranges (partitioned_stream_client.go). Uses gRPC/pgwire for the subscription.
+
+2. **Stream ingestion processor** (`stream_ingestion_processor.go`): The core consumer-side event loop. It:
+   - Subscribes to multiple partitions via `streamclient.Client.Subscribe()`
+   - Merges partitioned event streams via `MergedSubscription`
+   - Receives events: `KVEvent` (point KVs), `SSTableEvent` (bulk SSTs), `DeleteRangeEvent`, `CheckpointEvent`, `SplitEvent`
+   - Buffers KVs locally in a `streamIngestionBuffer`, sorts by key, then flushes via `bulk.SSTBatcher` (which generates SST files and ingests them into Pebble)
+   - Tracks progress with a `span.Frontier` (resolved timestamps per span)
+
+3. **SSTBatcher** (`pkg/kv/bulk/`): Batches MVCC key-values, sorts them, generates SST files via Pebble's SST writer, and ingests them directly into the storage engine (bypassing the Raft replication layer entirely on the consumer side).
+
+4. **Key rekeying**: During ingestion, tenant keys are rewritten (`backupccl.KeyRewriter`) to map source tenant IDs to destination tenant IDs.
+
+5. **Producer side** (`producer/`): Serves the replication stream — scans source ranges and emits KV/SST events at a consistent resolved timestamp.
+
+6. **Protobuf definitions** (`pkg/repstream/streampb/`): Wire protocol for replication streams.
+
+**Design insight**: PCR bypasses the SQL layer entirely on the consumer — it writes MVCC key-values directly into the storage engine via SST ingestion. This is what makes it "physical" (byte-level) rather than "logical" (SQL-level). The consumer does not run SQL transactions; it directly applies raw KV batches at the storage layer.
+
+## TiKV (`tikv85/`)
+
+### Build System
+- **Rust toolchain**: pinned to nightly-2023-12-28 (`rust-toolchain.toml`)
+- **Build tool**: `make` wrapping Cargo
+- **Module**: workspace with 70+ crates under `components/`
+- **macOS build env** (required before `make build`):
+  ```bash
+  export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:/usr/bin:/bin:$PATH"
+  export CMAKE_POLICY_VERSION_MINIMUM=3.5
+  export CFLAGS="-Wno-error=nontrivial-memcall"
+  export CXXFLAGS="-Wno-error=nontrivial-memcall"
+  ```
+- **编译黄金法则**：
+  1. `cargo check -p <crate>` 先验证 Rust 语法（秒级，跳过 C 编译）
+  2. 所有 env var **必须在同一行 export**，否则 cmake 不生效
+  3. cmake 缓存坏了：`cargo clean -p grpcio-sys` 清缓存
+  4. 最后一次性 `cargo build -p tikv-server`
+  ```
+  export CMAKE_POLICY_VERSION_MINIMUM=3.5 && cargo check -p cdc  # 快速验语法
+  export CMAKE_POLICY_VERSION_MINIMUM=3.5 && cargo build -p tikv-server  # 正式编译
+  ```
+- **编译诊断规则**：`cargo check -p <crate>` 通过但 `cargo build` 在 grpcio-sys cmake 失败 → Rust 代码正确，是 cmake 缓存问题。`cargo clean -p grpcio-sys` 解决。
+- **cmake 版本**：macOS cmake 4.1.2 需要 `CMAKE_POLICY_VERSION_MINIMUM=3.5`。
+- Useful commands (from `AGENTS.md`):
+  - `make build` — development build
+  - `make release` — optimized release build (thinLTO)
+  - `make dev` — format + clippy + tests (PR gate)
+  - `make test` — full test suite
+  - `./scripts/test $TESTNAME -- --nocapture` — run a specific test
+  - `make format` — rustfmt
+  - `make clippy` — clippy with TiKV config
+- **standalone tools**:
+  - `cmd/pcr-ctl/` — PCR lifecycle CLI (Rust, stable toolchain: `cargo +stable build`)
+  - `cmd/tikv-ctl/` — PCR additions: `raw-put`, `kv-prewrite`, `raw-batch-put` subcommands
+- **Grafana**: `agent-browser` CLI (`npx agent-browser`) with `--headed` flag and `AGENT_BROWSER_SESSION_NAME` for persistent login
+- **Prometheus**: `/Users/cjn/tidb/tidb-deploy/prometheus-9090/` (config + rules)
+
+### Architecture (analogous to PCR)
+
+- **raftstore** (`components/raftstore/`): Raft consensus store — handles Raft log replication, snapshotting, region splits/merges
+- **raftstore-v2** (`components/raftstore-v2/`): Next-gen raftstore with improved batching and async apply
+- **cdc** (`components/cdc/`): Change Data Capture — streams KV change events to downstream consumers (TiCDC). Uses a `ChangeLog` trait to track resolved timestamps.
+- **backup-stream** (`components/backup-stream/`): Streaming backup — captures KV changes and uploads to external storage
+- **backup** (`components/backup/`): BR (Backup & Restore) — bulk data movement via SST files
+- **sst_importer** (`components/sst_importer/`): Ingests SST files into RocksDB
+- **raft_log_engine** (`components/raft_log_engine/`): Raft log persistent storage
+- **pd_client** (`components/pd_client/`): Client for Placement Driver (scheduling/coordination)
+- **resolved_ts** (`components/resolved_ts/`): Resolved timestamp tracking for changefeeds
+- **engine_traits** (`components/engine_traits/`): Abstract storage engine interface
+- **engine_rocks** (`components/engine_rocks/`): RocksDB implementation
+
+### Key differences from CockroachDB for PCR feasibility
+
+1. **Storage engine**: TiKV uses RocksDB (C++ via rust-rocksdb bindings), CockroachDB uses Pebble (Go-native). Both are LSM-tree based and support SST ingestion.
+
+2. **Raft integration**: In CockroachDB PCR, the consumer bypasses Raft — ingested SSTs are written directly to the storage engine. TiKV would need a similar "direct write" path that doesn't go through the Raft state machine.
+
+3. **CDC infrastructure**: TiKV's `cdc` component already captures KV change events with resolved timestamps — analogous to CockroachDB's range feed. The `backup-stream` component is the closest equivalent to PCR's producer.
+
+4. **SST ingestion**: TiKV has `sst_importer` for ingesting SST files, but it's designed for snapshot restore (BR), not continuous stream ingestion.
+
+5. **Region-based vs Range-based**: Both use range/region-based sharding with Raft replication. TiKV's Region ~= CockroachDB's Range.
+
+### PCR Implementation on TiKV (E2E verified, P0/P1 complete)
+
+**Status (2026-05-01):** All P0/P1 features implemented and verified. 6 bugs fixed. Grafana dashboard (21 panels) with Consumer+Producer monitoring. See `/Users/cjn/.claude/projects/-Users-cjn-Documents-OpenSource-dig-tidb/memory/pcr-status-2026-04-29.md` for full detail.
+
+**Architecture:**
+- **Consumer (target)**: `components/stream-ingest/` — 17-file crate, tokio event loop, SstBatcher → DirectIngest (bypass Raft)
+- **Producer (source)**: CDC extension in `components/cdc/src/` — PcrEventBatcher, bridge threads (tokio Arc<Runtime>), snapshot scan via RocksDB secondary
+- **gRPC wire**: `proto/pcrpb/pcrpb.proto` — PcrStream service, PcrEvent (KvBatch/SST/Checkpoint/Split/DeleteRange)
+- **Operations**: pcr-ctl CLI, tikv-ctl raw-put/kv-prewrite/raw-batch-put, HTTP control API (port 20190)
+- **Observability**: 20+ Prometheus metrics, Grafana dashboard (`metrics/grafana/tikv_pcr.json`), 7 alert rules
+
+**Key bug fixes (2026-04-30 session):**
+1. CDC observer max_level < All → `ObserveHandle::fresh_handle()` (independent Arc)
+2. Lag=0 → shared PD TSO via `Arc<AtomicU64>` between CDC endpoint and bridge threads
+3. Source batcher 1-2 KV/event → `should_flush()` with 1MB/150ms threshold+timer
+4. Source batcher minutes delay → `maybe_flush_pcr_batcher()` called from `on_min_ts` every 1s
+5. Phase 2 checkpoint never fires → `tokio::select!` with 5s interval
+6. Split awareness misses regions → 30s periodic full region re-discovery
+
+**Port scheme (avoid conflicts with tiup local-cluster.yaml):**
+```
+PCR: PD src=3379, PD tgt=3380, TiKV src=30162, TiKV tgt=30161, TiDB src=4100, TiDB tgt=4101
+tiup: PD 2379/2479/2579, TiKV 20160/20161/20162, TiDB 4000
+Prometheus: 9091, Grafana: 3001, PCR API: 20190
+```
+
+**Test cluster setup:**
+```bash
+# Copy configs first
+cp develop/pcr-configs/pcr-src-tikv.toml /tmp/pcr-src-tikv.toml
+cp develop/pcr-configs/pcr-tgt-tikv.toml /tmp/pcr-tgt-tikv.toml
+
+# PDs
+pd-server --name=pd-src --client-urls=http://127.0.0.1:3379 --peer-urls=http://127.0.0.1:3377 --data-dir=/tmp/pcr-src-pd --initial-cluster=pd-src=http://127.0.0.1:3377 &
+pd-server --name=pd-tgt --client-urls=http://127.0.0.1:3380 --peer-urls=http://127.0.0.1:3378 --data-dir=/tmp/pcr-tgt-pd --initial-cluster=pd-tgt=http://127.0.0.1:3378 &
+
+# TiKVs
+tikv-server --pd-endpoints=127.0.0.1:3380 --addr=127.0.0.1:30161 --config=/tmp/pcr-tgt-tikv.toml &
+tikv-server --pd-endpoints=127.0.0.1:3379 --addr=127.0.0.1:30162 --config=/tmp/pcr-src-tikv.toml &
+
+# TiDBs (target uses PCR-friendly build: /tmp/tidb-server-pcr)
+tidb-server -P 4100 --status=10082 --store=tikv --path=127.0.0.1:3379 &
+/tmp/tidb-server-pcr -P 4101 --status=10081 --store=tikv --path=127.0.0.1:3380 &
+
+# PCR control
+curl -X POST http://127.0.0.1:20190/pcr/control -d '{"action":"create","task":"pcr_default","source_pd":"127.0.0.1:3379"}'
+curl http://127.0.0.1:20190/pcr/status
+
+# Prometheus + Grafana
+prometheus --config.file=metrics/grafana/prometheus-pcr.yml --web.listen-address=":9091" --storage.tsdb.path=/tmp/prom-pcr-data &
+grafana-server --homepath ~/.tiup/components/grafana/v8.5.3 --config ~/tidb/tidb-deploy/grafana-3000/conf/grafana.ini &
+```
+
+**E2E test pattern:**
+```bash
+# Bulk write via TiDB
+for round in $(seq 1 5); do
+  for b in $(seq 1 50); do
+    mysql -u root -h 127.0.0.1 -P 4100 -e "USE pcr; INSERT INTO t (v) VALUES $VALS;" 2>/dev/null
+  done
+  sleep 2
+done
+# Observe: KVs via curl http://127.0.0.1:20180/metrics | grep pcr_ingested_kvs
+```
+
+**Known limitations:**
+- raft-kv v1 raw_put: CDC observer does not reliably capture raw_put writes. TiDB transactional path works correctly.
+- `pcr-ctl` uses `curl` subprocess (reqwest incompatible with raw TCP HTTP parser)
+- Target PD and source PD must BOTH be restarted when either TiKV restarts (duplicated store address)
+
+### TiKV's AGENTS.md
+
+The `tikv85/AGENTS.md` (at project root) is the primary AI agent guide for that codebase. It covers build, testing, code style, security policies, and deployment in detail. Refer to it when working in the TiKV tree.
