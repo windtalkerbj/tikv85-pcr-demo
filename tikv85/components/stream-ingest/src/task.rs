@@ -818,7 +818,7 @@ impl<E: KvEngine> StreamIngestTask<E> {
         // Create a dedicated multi-threaded tokio runtime for the PCR event loop.
         // Uses 2 worker threads: one for event loop, one for background gRPC tasks.
         let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
+            .worker_threads(4)
             .thread_name("pcr-event-loop")
             .enable_time()
             .build()

@@ -171,12 +171,16 @@ impl SpanBridge {
         }
 
         // Writer task: receives batches from merge, sends to gRPC one-by-one.
+        // NOTE: after sink.send() returns Err, the underlying CqFuture is consumed.
+        // Polling it again causes FATAL panic ("Resolved future is not supposed
+        // to be polled again"). We must break out of both loops.
         let writer_rt = bridge_rt.clone();
         writer_rt.spawn(async move {
-            while let Some(batch) = merge_rx.recv().await {
+            'writer: while let Some(batch) = merge_rx.recv().await {
                 for event in batch {
                     if sink.send((event, WriteFlags::default())).await.is_err() {
-                        warn!("PCR span_bridge: gRPC sink send failed, dropping event");
+                        warn!("PCR span_bridge: gRPC sink send failed, closing writer");
+                        break 'writer;
                     }
                 }
             }
