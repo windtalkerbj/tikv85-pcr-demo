@@ -641,6 +641,11 @@ impl Delegate {
                 STREAM_INGEST_METRICS.source_batcher_bytes.set(sz as i64);
             }
             if batcher.should_flush() {
+                info!("PCR diag: maybe_flush flush";
+                    "region_id" => self.region_id,
+                    "size" => batcher.size(),
+                    "elapsed_ms" => batcher.last_flush.elapsed().as_millis(),
+                );
                 if let Some(event) = batcher.flush() {
                     self.emit_pcr_event(event);
                 }
@@ -1110,9 +1115,9 @@ impl Delegate {
         }
 
         // PCR: Flush accumulated events unconditionally.
-        // NOTE: attempts to batch (64KB threshold) caused relay to stall
-        // mid-benchmark — confirmed hidden flush-driven ordering dependency
-        // in the relay/sink lifecycle. Force-flush ensures correctness.
+        // Investigation confirmed: relay never exits, maybe_flush works.
+        // 64KB threshold stalls benchmark convergence — root cause TBD,
+        // likely split-child delegate PCR attachment timing.
         self.maybe_flush_pcr_batcher();
         if let Some(ref mut batcher) = self.pcr_batcher {
             if batcher.size() > 0 {
