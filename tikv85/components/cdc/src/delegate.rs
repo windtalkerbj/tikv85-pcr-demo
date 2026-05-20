@@ -1019,10 +1019,6 @@ impl Delegate {
         old_value_cache: &mut OldValueCache,
         statistics: &mut Statistics,
     ) -> Result<()> {
-        debug!("cdc: sink_data";
-            "region_id" => self.region_id,
-            "request_count" => requests.len(),
-        );
         // PCR delegates may have txn_extra_op = Noop from StoreMeta.
         // Normal TiCDC delegates have ReadOldValue.
         debug_assert!(
@@ -1030,19 +1026,12 @@ impl Delegate {
                 || self.txn_extra_op.load() == TxnExtraOp::Noop
         );
 
-        let read_old_value = |row: &mut EventRow, read_old_ts| -> Result<()> {
-            let key = Key::from_raw(&row.key).append_ts(row.start_ts.into());
-            let old_value = old_value_cb(key, read_old_ts, old_value_cache, statistics)?;
-            row.old_value = old_value.unwrap_or_default();
-            Ok(())
-        };
-
         let mut rows_builder = RowsBuilder::default();
         rows_builder.is_one_pc = flags.contains(WriteBatchFlags::ONE_PC);
         for mut req in requests {
             let cmd_type = req.get_cmd_type();
             match cmd_type {
-                CmdType::Put => self.sink_put(req.take_put(), &mut rows_builder)?,
+                CmdType::Put => self.sink_put(req.take_put(), &mut rows_builder, old_value_cb, old_value_cache, statistics)?,
 
                 // PCR: Handle IngestSst commands — these contain SST file metadata
                 // pointing to actual KV data written by Lightning/fast-DDL/BR.
@@ -1120,12 +1109,9 @@ impl Delegate {
             };
         }
 
-        // PCR: Flush accumulated events unconditionally — do NOT rely on
-        // the 150ms time threshold here. Sparse writes (e.g. DELETE as the
-        // last command to a region) would otherwise be stuck until another
-        // write arrives or on_min_ts fires.
+        // PCR: Flush accumulated events unconditionally.
         self.maybe_flush_pcr_batcher();
-        // Force-flush any remaining data that didn't meet the time threshold.
+        // Force-flush remaining data that didn't meet the time threshold.
         if let Some(ref mut batcher) = self.pcr_batcher {
             if batcher.size() > 0 {
                 if let Some(event) = batcher.flush() {
@@ -1134,6 +1120,12 @@ impl Delegate {
             }
         }
 
+        let read_old_value = |row: &mut EventRow, read_old_ts| -> Result<()> {
+            let key = Key::from_raw(&row.key).append_ts(row.start_ts.into());
+            let old_value = old_value_cb(key, read_old_ts, old_value_cache, statistics)?;
+            row.old_value = old_value.unwrap_or_default();
+            Ok(())
+        };
         let (raws, txns) = rows_builder.finish_build();
         self.sink_downstream_raw(raws, index)?;
         self.sink_downstream_tidb(txns, read_old_value)?;
@@ -1334,40 +1326,49 @@ impl Delegate {
         Ok(())
     }
 
-    fn sink_put(&mut self, put: PutRequest, rows_builder: &mut RowsBuilder) -> Result<()> {
+    fn sink_put(
+        &mut self,
+        put: PutRequest,
+        rows_builder: &mut RowsBuilder,
+        old_value_cb: &OldValueCallback,
+        old_value_cache: &mut OldValueCache,
+        statistics: &mut Statistics,
+    ) -> Result<()> {
         let key_mode = ApiV2::parse_key_mode(put.get_key());
         if key_mode == KeyMode::Raw {
-            self.sink_raw_put(put, rows_builder)
+            self.sink_raw_put(put, rows_builder, old_value_cb, old_value_cache, statistics)
         } else {
-            self.sink_txn_put(put, rows_builder)
+            self.sink_txn_put(put, rows_builder, old_value_cb, old_value_cache, statistics)
         }
     }
 
-    fn sink_raw_put(&mut self, mut put: PutRequest, rows: &mut RowsBuilder) -> Result<()> {
-        // PCR: Add raw MVCC KV to the PCR batcher. For LOCK CF, extract
-        // short_value from PessimisticLock (same logic as sink_txn_put).
+    fn sink_raw_put(
+        &mut self,
+        mut put: PutRequest,
+        rows: &mut RowsBuilder,
+        old_value_cb: &OldValueCallback,
+        old_value_cache: &mut OldValueCache,
+        statistics: &mut Statistics,
+    ) -> Result<()> {
+        // PCR: only WRITE CF commit events drive replication.
+        // DEFAULT CF values are backing storage — never replicated directly
+        // (would leak uncommitted data for rolled-back txns).
         if let Some(ref mut batcher) = self.pcr_batcher {
             if put.get_cf() == "lock" {
-                // LOCK CF is transaction intent metadata, NOT committed state.
-                // PCR replicates only committed MVCC state (WRITE CF semantic).
-                // Ignoring lock intents eliminates phantom rows from uncommitted
-                // transactions and the need for rollback tombstone compensation.
+                // LOCK CF skipped — not committed state.
             } else if put.get_cf() == "write" {
-                // MVCC semantic replication: parse WriteRef to extract the
-                // logical mutation (Put/Delete/Rollback) instead of blindly
-                // forwarding raw WRITE CF bytes.
-                //
-                // The WRITE CF key in the Raft command is:
-                //   memcomparable(user_key) + encoded(commit_ts)
-                // WITHOUT the 'z' prefix (added by handle_put during apply).
-                if let Some(mutation) = LogicalMutation::from_write_cf(
-                    put.get_key(),
-                    put.get_value(),
-                ) {
+                let result = LogicalMutation::from_write_cf(put.get_key(), put.get_value());
+                if let Some(mutation) = result {
                     match mutation {
-                        LogicalMutation::Put { default_key, write_key, ref short_value, .. } => {
+                        LogicalMutation::Put { default_key, write_key, start_ts, ref short_value, .. } => {
                             if let Some(ref val) = short_value {
                                 batcher.add_kv(default_key, val.clone(), OpType::Put, "default");
+                            } else {
+                                // Large value: read DEFAULT CF at start_ts.
+                                let dk = Key::from_encoded(default_key.clone());
+                                if let Ok(Some(val)) = old_value_cb(dk, start_ts, old_value_cache, statistics) {
+                                    batcher.add_kv(default_key, val, OpType::Put, "default");
+                                }
                             }
                             let mut wk = Vec::with_capacity(1 + write_key.len());
                             wk.push(b'z');
@@ -1381,32 +1382,19 @@ impl Delegate {
                             wk.extend_from_slice(&write_key);
                             batcher.add_kv(wk, put.get_value().to_vec(), OpType::Put, "write");
                         }
-                        LogicalMutation::Rollback { .. } => {
-                            // Lock intents are not replicated. Rollback only
-                            // undoes a Lock — no compensation needed.
-                        }
+                        LogicalMutation::Rollback { .. } => {}
                     }
                 } else {
-                    // Fallback: couldn't parse WriteRef — forward raw as before.
                     PCR_PRODUCER_METRICS.write_ref_parse_fallbacks.inc();
                     let mut key = Vec::with_capacity(1 + put.get_key().len());
                     key.push(b'z');
                     key.extend_from_slice(put.get_key());
                     batcher.add_kv(key, put.get_value().to_vec(), OpType::Put, put.get_cf());
                 }
-            } else {
-                // Empty cf means DEFAULT CF in TiKV. Only DEFAULT CF gets 'z' prefix.
-                let is_default = put.get_cf().is_empty() || put.get_cf() == "default";
-                let key = if is_default {
-                    let mut k = Vec::with_capacity(1 + put.get_key().len());
-                    k.push(b'z');
-                    k.extend_from_slice(put.get_key());
-                    k
-                } else {
-                    put.get_key().to_vec()
-                };
-                batcher.add_kv(key, put.get_value().to_vec(), OpType::Put, put.get_cf());
             }
+            // DEFAULT CF puts (cf="" or "default") are NOT replicated.
+            // Only WRITE CF commit drives replication — this prevents
+            // uncommitted data from leaking through PCR.
         }
 
         let mut row = EventRow::default();
@@ -1415,38 +1403,29 @@ impl Delegate {
         Ok(())
     }
 
-    fn sink_txn_put(&mut self, mut put: PutRequest, rows: &mut RowsBuilder) -> Result<()> {
-        // PCR: Add raw MVCC KV to the PCR batcher for replication.
-        // Capture write/default CFs. For LOCK CF, extract the short_value
-        // from PessimisticLock — in TiDB pessimistic transactions, small
-        // values are stored directly in the lock and no separate DEFAULT CF
-        // write is issued. Without this, live CDC drops all row data.
-        // IMPORTANT: put.get_key() from the Raft CmdBatch does NOT include
-        // the DATA_PREFIX ('z'); the snapshot scan path reads keys from RocksDB
-        // which DO include 'z'. We add it only for DEFAULT CF to match.
-        // WRITE CF keys use memcomparable encoding WITHOUT 'z' prefix.
+    fn sink_txn_put(
+        &mut self,
+        mut put: PutRequest,
+        rows: &mut RowsBuilder,
+        old_value_cb: &OldValueCallback,
+        old_value_cache: &mut OldValueCache,
+        statistics: &mut Statistics,
+    ) -> Result<()> {
         if let Some(ref mut batcher) = self.pcr_batcher {
             if put.get_cf() == "lock" {
-                // LOCK CF is transaction intent metadata, NOT committed state.
-                // PCR replicates only committed MVCC state (WRITE CF semantic).
-                // Ignoring lock intents eliminates phantom rows from uncommitted
-                // transactions and the need for rollback tombstone compensation.
+                // LOCK CF skipped — not committed state.
             } else if put.get_cf() == "write" {
-                // MVCC semantic replication: parse WriteRef to extract the
-                // logical mutation (Put/Delete/Rollback) instead of blindly
-                // forwarding raw WRITE CF bytes.
-                //
-                // The WRITE CF key in the Raft command is:
-                //   memcomparable(user_key) + encoded(commit_ts)
-                // WITHOUT the 'z' prefix (added by handle_put during apply).
-                if let Some(mutation) = LogicalMutation::from_write_cf(
-                    put.get_key(),
-                    put.get_value(),
-                ) {
+                let result = LogicalMutation::from_write_cf(put.get_key(), put.get_value());
+                if let Some(mutation) = result {
                     match mutation {
-                        LogicalMutation::Put { default_key, write_key, ref short_value, .. } => {
+                        LogicalMutation::Put { default_key, write_key, start_ts, ref short_value, .. } => {
                             if let Some(ref val) = short_value {
                                 batcher.add_kv(default_key, val.clone(), OpType::Put, "default");
+                            } else {
+                                let dk = Key::from_encoded(default_key.clone());
+                                if let Ok(Some(val)) = old_value_cb(dk, start_ts, old_value_cache, statistics) {
+                                    batcher.add_kv(default_key, val, OpType::Put, "default");
+                                }
                             }
                             let mut wk = Vec::with_capacity(1 + write_key.len());
                             wk.push(b'z');
@@ -1460,33 +1439,18 @@ impl Delegate {
                             wk.extend_from_slice(&write_key);
                             batcher.add_kv(wk, put.get_value().to_vec(), OpType::Put, "write");
                         }
-                        LogicalMutation::Rollback { .. } => {
-                            // Lock intents are not replicated. Rollback only
-                            // undoes a Lock — no compensation needed.
-                        }
+                        LogicalMutation::Rollback { .. } => {}
                     }
                 } else {
-                    // Fallback: couldn't parse WriteRef — forward raw as before.
                     PCR_PRODUCER_METRICS.write_ref_parse_fallbacks.inc();
                     let mut key = Vec::with_capacity(1 + put.get_key().len());
                     key.push(b'z');
                     key.extend_from_slice(put.get_key());
                     batcher.add_kv(key, put.get_value().to_vec(), OpType::Put, put.get_cf());
                 }
-            } else {
-                // Empty cf means DEFAULT CF in TiKV. Both "default" and ""
-                // need the 'z' prefix. WRITE CF stays without prefix.
-                let is_default = put.get_cf().is_empty() || put.get_cf() == "default";
-                let key = if is_default {
-                    let mut k = Vec::with_capacity(1 + put.get_key().len());
-                    k.push(b'z');
-                    k.extend_from_slice(put.get_key());
-                    k
-                } else {
-                    put.get_key().to_vec()
-                };
-                batcher.add_kv(key, put.get_value().to_vec(), OpType::Put, put.get_cf());
             }
+            // DEFAULT CF puts (cf="" or "default") are NOT replicated —
+            // only WRITE CF commit drives replication.
         }
 
         match put.cf.as_str() {
