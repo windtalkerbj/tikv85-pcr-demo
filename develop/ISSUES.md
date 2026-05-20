@@ -10,9 +10,11 @@
 
 WriteRef.short_value = None（>255B）时，live CDC 不复制 DEFAULT CF 值。需在 Commit 时从 RocksDB snapshot 读取 DEFAULT CF at start_ts。TPCC CUSTOMER.c_data(500B) 触发。
 
-### #9. TRUNCATE / DeleteRange 旧数据清理
+### #9. TRUNCATE / DeleteRange 旧数据清理（架构边界，非 bug）
 
-TiDB 清理链路（官方 TiKV 8.5.6 验证）：DDL → `mysql.gc_delete_range`（普通 INSERT，CDC 可复制 ✅）→ GC worker → `UnsafeDestroyRange` gRPC → `write_modifies()`（不走 Raft ❌）。生产级方案：cutover 后目标 TiDB GC worker 自然接管。
+TRUNCATE/DROP 本质是 table_id rotate——旧 table_id 被废弃，新 table_id 创建。SQL 层旧数据已不可见，功能正确性不受影响。物理清理走 GC worker → UnsafeDestroyRange gRPC → write_modifies()，绕过 Raft，PCR observer 不可见。
+
+PCR 不复制非 Raft 路径的 RocksDB maintenance operation。这是架构边界，不是 bug。目标 GC worker 因 TSO 域不同未必执行源端 GC job。Demo 接受旧数据残留（占空间、不影响查询）。可选增强：consumer 维护 dropped_table_ids tombstone metadata。
 
 ## 已解决
 
@@ -24,6 +26,7 @@ TiDB 清理链路（官方 TiKV 8.5.6 验证）：DDL → `mysql.gc_delete_range
 12. Worker 真并行 → `worker_threads(1)→(4)`。单 OS thread 时 `flush()` 同步阻塞独占线程，4 worker 串行化。4 thread 后真并行 ✅
 13. 5 仓 TPCC 收敛 → 284s (178s prepare + 106s PCR)，9/9 ✅
 14. Consumer dispatch → `handle_data_event` 用 `AtomicU64` 自增实现 round-robin，span mode 下 region_id=0 时 4 worker 均匀分片 ✅
+15. #8 大值 live CDC → WRITE CF commit 为唯一复制入口（移除 DEFAULT CF 直接复制，消除 phantom row 风险）。`short_value=None` 时通过 `old_value_cb` 回查 DEFAULT CF at start_ts。单条 INSERT 精确收敛，5 仓 benchmark 差 <0.002%。剩余极小 gap 来自 TSO 域不同（已知限制 #1） ✅
 
 ### 2026-05-18/19
 
