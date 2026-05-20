@@ -1110,8 +1110,10 @@ impl Delegate {
         }
 
         // PCR: Flush accumulated events unconditionally.
+        // NOTE: attempts to batch (64KB threshold) caused relay to stall
+        // mid-benchmark — confirmed hidden flush-driven ordering dependency
+        // in the relay/sink lifecycle. Force-flush ensures correctness.
         self.maybe_flush_pcr_batcher();
-        // Force-flush remaining data that didn't meet the time threshold.
         if let Some(ref mut batcher) = self.pcr_batcher {
             if batcher.size() > 0 {
                 if let Some(event) = batcher.flush() {
