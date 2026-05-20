@@ -96,10 +96,7 @@ impl SpanBridge {
                 // Wait for first event with no timeout
                 let first = match fut_rx.next().await {
                     Some(data) => data,
-                    None => {
-                        info!("PCR relay: fut_rx closed — all senders dropped, exiting");
-                        break;
-                    }
+                    None => break,
                 };
                 if let Ok(event) = protobuf::parse_from_bytes::<PcrEvent>(&first) {
                     buf.push(event);
@@ -122,10 +119,7 @@ impl SpanBridge {
                 }
                 if !buf.is_empty() {
                     let batch = std::mem::take(&mut buf);
-                    if relay_tx.send(batch).await.is_err() {
-                        info!("PCR relay: merge_tx closed, exiting");
-                        break;
-                    }
+                    if relay_tx.send(batch).await.is_err() { break; }
                 }
             }
         });

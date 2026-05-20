@@ -641,11 +641,6 @@ impl Delegate {
                 STREAM_INGEST_METRICS.source_batcher_bytes.set(sz as i64);
             }
             if batcher.should_flush() {
-                info!("PCR diag: maybe_flush flush";
-                    "region_id" => self.region_id,
-                    "size" => batcher.size(),
-                    "elapsed_ms" => batcher.last_flush.elapsed().as_millis(),
-                );
                 if let Some(event) = batcher.flush() {
                     self.emit_pcr_event(event);
                 }
