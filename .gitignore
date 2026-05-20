@@ -1,7 +1,12 @@
 tikv85/.local-deps/
 cockroach24/
 offcial-tidb-8.5.6/
+offcial-tikv-8.5.6/
+pd-8.5.6/
+tiflow-release-8.5/
 .claude/
 docs/
 .DS_Store
 *.md.0518
+*.log
+/tmp/
