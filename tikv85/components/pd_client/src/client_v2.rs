@@ -92,7 +92,7 @@ impl RawClient {
             v => v.saturating_add(1),
         };
         for i in 0..retries {
-            match ctx.connector.validate_endpoints(&ctx.cfg, false).await {
+            match ctx.connector.validate_endpoints(&ctx.cfg, true).await {
                 Ok((stub, target_info, members, _)) => {
                     return Ok(RawClient {
                         stub,

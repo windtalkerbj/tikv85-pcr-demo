@@ -37,6 +37,10 @@ impl<E: KvEngine> DirectIngestContext<E> {
         &self.engine
     }
 
+    pub fn pd_client(&self) -> &Arc<dyn PdClient> {
+        &self.pd_client
+    }
+
     /// Update the cached Region metadata from StoreMeta.
     /// Called periodically or on Region change events (split/merge).
     pub fn update_region(&self, region: Region) {

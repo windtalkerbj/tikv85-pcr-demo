@@ -463,6 +463,13 @@ async fn run_event_loop<E: KvEngine>(
     let mut ddl_discover = tokio::time::interval(
         std::time::Duration::from_secs(1),
     );
+    // TSO bumper: periodically drains target TiDB's TSO cache so replicated
+    // data becomes MVCC-visible. Spawns 200 concurrent mysql sessions doing
+    // START TRANSACTION — each new session gets a fresh PD TSO allocation,
+    // rapidly advancing the target PD clock past replicated commit_ts.
+    let mut tso_bump = tokio::time::interval(
+        std::time::Duration::from_secs(5),
+    );
     // Spawn per-region ingest workers. Each owns a batcher and processes
     // a subset of regions (region_id % INGEST_WORKERS). The main tx stays
     // in PcrComponents.workers for dispatch_event().
@@ -552,6 +559,13 @@ async fn run_event_loop<E: KvEngine>(
                 // Bump target TiDB schema version so new tables become visible.
                 if !new_spans.is_empty() {
                     components.schema_sync.bump_schema();
+                }
+            }
+            _ = tso_bump.tick() => {
+                use pd_client::PdClient;
+                match components.ingest_ctx.pd_client().batch_get_tso(100_000).await {
+                    Ok(ts) => info!("PCR: TSO bump OK ts={}", ts),
+                    Err(e) => info!("PCR: TSO bump ERR {:?}", e),
                 }
             }
             _ = cutover_check.tick() => {
