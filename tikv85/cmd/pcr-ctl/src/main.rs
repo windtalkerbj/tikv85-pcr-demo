@@ -416,8 +416,9 @@ async fn main() -> anyhow::Result<()> {
             handle_start(&cli, source_pd, retention, task_name.as_deref()).await,
         Commands::Create { target, source_pd, task } =>
             handle_create(target, source_pd, task).await,
-        Commands::StandbyStatus { task, watch } => {
-            if watch {
+        Commands::StandbyStatus { watch, .. } => {
+            let client = PcrClient::new(&cli.pd);
+            if *watch {
                 loop {
                     standby_one_liner(&client).await;
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -425,6 +426,7 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 standby_one_liner(&client).await;
             }
+            Ok(())
         }
         Commands::Status { task, detailed, watch } =>
             handle_status(&cli, task, *detailed, *watch).await,
