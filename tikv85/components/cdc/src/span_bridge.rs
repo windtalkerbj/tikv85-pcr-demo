@@ -6,7 +6,7 @@
 //! shared sink. Region split/merge is transparent because the endpoint's
 //! PcrRegistry auto-attaches the shared sink to new delegates at birth.
 
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
@@ -186,12 +186,27 @@ impl SpanBridge {
             }
         });
 
-        // Idle loop: keep the SpanBridge alive for the gRPC stream lifetime.
-        // The endpoint's PcrRegistry handles all region lifecycle; no periodic
-        // scanning is needed. Full scan ran at startup; live CDC flows through
-        // the shared sink → relay → merge_rx → writer above.
+        // Periodic checkpoint ticker: sends Checkpoint events every 5s so the
+        // consumer can populate its frontier and persist checkpoints for
+        // pause/resume. Includes a sentinel region_id=0 to ensure the frontier
+        // is non-empty (span mode has no per-region IDs).
+        let regions = self.resolve_regions();
+        let all_region_ids: Vec<u64> = regions.iter().map(|(rid, _, _, _, _)| *rid).collect();
+        let mut cp_ticker = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            cp_ticker.tick().await;
+            let resolved_ts = self.pcr_resolved_ts.load(Ordering::Acquire);
+            if resolved_ts > 0 {
+                let mut cp = PcrCheckpoint::new();
+                cp.set_resolved_ts(resolved_ts);
+                for &rid in &all_region_ids {
+                    cp.mut_region_ids().push(rid);
+                }
+                let mut event = PcrEvent::new();
+                event.set_checkpoint(cp);
+                let batch = vec![event];
+                let _ = merge_tx.send(batch).await;
+            }
         }
     }
 

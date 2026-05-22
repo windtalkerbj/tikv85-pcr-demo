@@ -200,22 +200,10 @@ fn handle_connection(mut stream: TcpStream, scheduler: Arc<Mutex<Option<Schedule
                     ))
                 }
                 "resume" => {
-                    // Verify checkpoint exists — resume is delta-only and requires prior replication.
-                    let state_data_dir = std::path::Path::new("/tmp/pcr-tgt-data/pcr");
-                    let checkpoint_file = state_data_dir.join("pcr_checkpoint_pcr_default.json");
-                    let has_checkpoint = std::fs::metadata(&checkpoint_file).is_ok();
-                    if !has_checkpoint {
-                        let err_msg = "No checkpoint found — cannot resume without prior replication. Use 'create' for a fresh full scan.".to_string();
-                        slog_global::error!("{}", err_msg);
-                        serde_json::to_string(&PcrStatusResponse::simple(
-                            task_name, "error", err_msg,
-                        ))
-                    } else {
-                        let _ = sched.schedule(Task::ResumeReplication);
-                        serde_json::to_string(&PcrStatusResponse::simple(
-                            task_name, "running", "Replication resumed (delta-only from checkpoint)".into(),
-                        ))
-                    }
+                    let _ = sched.schedule(Task::ResumeReplication);
+                    serde_json::to_string(&PcrStatusResponse::simple(
+                        task_name, "running", "Replication resumed".into(),
+                    ))
                 }
                 "cutover" => {
                     let cutover_ts = if req.latest.unwrap_or(false) {
