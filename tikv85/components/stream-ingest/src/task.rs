@@ -563,10 +563,7 @@ async fn run_event_loop<E: KvEngine>(
             }
             _ = tso_bump.tick() => {
                 use pd_client::PdClient;
-                match components.ingest_ctx.pd_client().batch_get_tso(100_000).await {
-                    Ok(ts) => info!("PCR: TSO bump OK ts={}", ts),
-                    Err(e) => info!("PCR: TSO bump ERR {:?}", e),
-                }
+                let _ = components.ingest_ctx.pd_client().batch_get_tso(100_000).await;
             }
             _ = cutover_check.tick() => {
                 // Update cutover progress metric (0-100%)
