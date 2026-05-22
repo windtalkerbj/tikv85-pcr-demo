@@ -186,26 +186,58 @@ impl SpanBridge {
             }
         });
 
-        // Periodic checkpoint ticker: sends Checkpoint events every 5s so the
-        // consumer can populate its frontier and persist checkpoints for
-        // pause/resume. Includes a sentinel region_id=0 to ensure the frontier
-        // is non-empty (span mode has no per-region IDs).
+        // Periodic checkpoint ticker: sends Checkpoint events every 5s.
         let regions = self.resolve_regions();
-        let all_region_ids: Vec<u64> = regions.iter().map(|(rid, _, _, _, _)| *rid).collect();
+        let mut known_region_ids: Vec<u64> = regions.iter().map(|(rid, _, _, _, _)| *rid).collect();
         let mut cp_ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+        // Region re-discovery: catch new regions from CREATE TABLE etc.
+        // Every 30s, re-resolve the span and scan any new regions.
+        let mut rediscover = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
-            cp_ticker.tick().await;
-            let resolved_ts = self.pcr_resolved_ts.load(Ordering::Acquire);
-            if resolved_ts > 0 {
-                let mut cp = PcrCheckpoint::new();
-                cp.set_resolved_ts(resolved_ts);
-                for &rid in &all_region_ids {
-                    cp.mut_region_ids().push(rid);
+            tokio::select! {
+                _ = cp_ticker.tick() => {
+                    let resolved_ts = self.pcr_resolved_ts.load(Ordering::Acquire);
+                    if resolved_ts > 0 {
+                        let mut cp = PcrCheckpoint::new();
+                        cp.set_resolved_ts(resolved_ts);
+                        for &rid in &known_region_ids {
+                            cp.mut_region_ids().push(rid);
+                        }
+                        let mut event = PcrEvent::new();
+                        event.set_checkpoint(cp);
+                        let batch = vec![event];
+                        let _ = merge_tx.send(batch).await;
+                    }
                 }
-                let mut event = PcrEvent::new();
-                event.set_checkpoint(cp);
-                let batch = vec![event];
-                let _ = merge_tx.send(batch).await;
+                _ = rediscover.tick() => {
+                    let current = self.resolve_regions();
+                    for &(region_id, _, _, _, _) in &current {
+                        if !known_region_ids.contains(&region_id) {
+                            info!("PCR span_bridge: new region discovered"; "region_id" => region_id);
+                            known_region_ids.push(region_id);
+                            // Ensure delegate exists for this region
+                            let (sink, _rx) = futures::channel::mpsc::unbounded::<Vec<u8>>();
+                            let _ = scheduler.schedule(Task::StartPcrStream {
+                                region_id, start_ts,
+                                event_sink: sink,
+                                event_buffer_size,
+                                event_flush_interval_ms,
+                            });
+                            // Full scan the new region
+                            if let Some(ref engine) = source_engine {
+                                let engine = engine.clone();
+                                let tx = merge_tx.clone();
+                                let is_full = start_ts == 0;
+                                let scan_start_ts = start_ts;
+                                let bridge_rt2 = bridge_rt.clone();
+                                bridge_rt2.spawn(async move {
+                                    let _permit = SCAN_SEM.acquire().await;
+                                    Self::scan_region(region_id, is_full, scan_start_ts, engine, tx).await;
+                                });
+                            }
+                        }
+                    }
+                }
             }
         }
     }
