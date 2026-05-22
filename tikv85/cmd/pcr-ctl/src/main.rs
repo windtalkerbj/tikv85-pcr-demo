@@ -299,9 +299,19 @@ async fn show_status(client: &PcrClient, task: &str, detailed: bool) {
                 println!("  Task:      {}", s.task.as_deref().unwrap_or("—"));
                 println!("  Status:    {}", s.status.as_deref().unwrap_or("—"));
                 println!("  Message:   {}", s.message.as_deref().unwrap_or("—"));
+                let mut min_ts: Option<u64> = None;
+                if let Some(ref f) = s.frontier {
+                    min_ts = f.values().min().copied();
+                }
                 if let Some(lag) = s.lag_seconds {
                     let standby = if lag < 2.0 { "🟢 ready" } else if lag < 10.0 { "🟡 catching up" } else { "🔴 lagging" };
                     println!("  Standby:   {} ({})", standby, fmt_dur(lag));
+                }
+                if let Some(ts) = min_ts {
+                    let secs = (ts >> 18) / 1000;
+                    if let Some(dt) = chrono::DateTime::from_timestamp(secs as i64, 0) {
+                        println!("  Replicated: {} ({} regions)", dt.format("%Y-%m-%d %H:%M:%S"), s.frontier.as_ref().map(|f| f.len()).unwrap_or(0));
+                    }
                 }
                 if let Some(bytes) = s.ingested_bytes {
                     println!("  Ingested:  {}", fmt_bytes(bytes));
@@ -373,18 +383,28 @@ async fn handle_cutover(cli: &Cli, task: &str, latest: bool, system_time: Option
 }
 
 async fn handle_list(cli: &Cli, _active: bool, json: bool) -> anyhow::Result<()> {
-    if json {
-        let tasks = vec![PcrTaskInfo {
-            task_name: "pcr_default".into(), task_id: "pcr_pcr_default".into(),
-            source_pd: "127.0.0.1:2379".into(), source_tables: vec!["*".into()],
-            status: "running".into(), checkpoint: None,
-            created_at: "...".into(), retention: "24h".into(),
-        }];
-        println!("{}", serde_json::to_string_pretty(&tasks)?);
-    } else {
-        println!("═══ PCR Tasks ═══");
-        println!("  pcr_default    RUNNING    lag=3.2s    source=127.0.0.1:2379");
-        println!("  [INFO] PD API not wired — demo data shown");
+    let client = PcrClient::new(&cli.pd);
+    match client.get_status().await {
+        Ok(resp) => {
+            #[derive(serde::Deserialize)]
+            struct S { status: Option<String>, lag_seconds: Option<f64>, message: Option<String> }
+            if let Ok(s) = serde_json::from_str::<S>(&resp) {
+                let status = s.status.as_deref().unwrap_or("?");
+                let lag = s.lag_seconds.unwrap_or(0.0);
+                let msg = s.message.as_deref().unwrap_or("");
+                if json {
+                    println!("{{\"task\":\"pcr_default\",\"status\":\"{}\",\"lag_seconds\":{:.1},\"message\":\"{}\"}}",
+                        status, lag, msg);
+                } else {
+                    let icon = if lag < 2.0 { "🟢" } else if lag < 10.0 { "🟡" } else { "🔴" };
+                    println!("═══ PCR Tasks ═══");
+                    println!("  {} pcr_default    {}    lag={:.1}s    {}", icon, status.to_uppercase(), lag, msg);
+                }
+            } else {
+                println!("  (unable to parse status)");
+            }
+        }
+        Err(_) => println!("  (PCR API unreachable)"),
     }
     Ok(())
 }
