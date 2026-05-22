@@ -50,6 +50,11 @@ enum Commands {
         #[arg(long, default_value = "pcr_default")]
         task: String,
     },
+    /// Check standby read readiness (one-line output)
+    StandbyStatus {
+        #[arg(default_value = "pcr_default")] task: String,
+        #[arg(short = 'w', long)] watch: bool,
+    },
     /// Show status (CRDB: SHOW VIRTUAL CLUSTER WITH REPLICATION STATUS)
     Status {
         #[arg(default_value = "all")] task: String,
@@ -257,6 +262,24 @@ async fn handle_status(cli: &Cli, task: &str, detailed: bool, watch: bool) -> an
     Ok(())
 }
 
+async fn standby_one_liner(client: &PcrClient) {
+    match client.get_status().await {
+        Ok(resp) => {
+            #[derive(serde::Deserialize)]
+            struct S { lag_seconds: Option<f64>, status: Option<String> }
+            if let Ok(s) = serde_json::from_str::<S>(&resp) {
+                let status = s.status.as_deref().unwrap_or("?");
+                let lag = s.lag_seconds.unwrap_or(999.0);
+                let state = if lag < 2.0 { "ready" } else { "lagging" };
+                println!("standby {} status={} lag={:.1}s", state, status, lag);
+            } else {
+                println!("standby unknown (parse error)");
+            }
+        }
+        Err(_) => println!("standby unknown (API unreachable)"),
+    }
+}
+
 async fn show_status(client: &PcrClient, task: &str, detailed: bool) {
     println!("═══ PCR Status: {} ═══", task);
     match client.get_status().await {
@@ -277,7 +300,8 @@ async fn show_status(client: &PcrClient, task: &str, detailed: bool) {
                 println!("  Status:    {}", s.status.as_deref().unwrap_or("—"));
                 println!("  Message:   {}", s.message.as_deref().unwrap_or("—"));
                 if let Some(lag) = s.lag_seconds {
-                    println!("  Lag:       {}", fmt_dur(lag));
+                    let standby = if lag < 2.0 { "🟢 ready" } else if lag < 10.0 { "🟡 catching up" } else { "🔴 lagging" };
+                    println!("  Standby:   {} ({})", standby, fmt_dur(lag));
                 }
                 if let Some(bytes) = s.ingested_bytes {
                     println!("  Ingested:  {}", fmt_bytes(bytes));
@@ -392,6 +416,16 @@ async fn main() -> anyhow::Result<()> {
             handle_start(&cli, source_pd, retention, task_name.as_deref()).await,
         Commands::Create { target, source_pd, task } =>
             handle_create(target, source_pd, task).await,
+        Commands::StandbyStatus { task, watch } => {
+            if watch {
+                loop {
+                    standby_one_liner(&client).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            } else {
+                standby_one_liner(&client).await;
+            }
+        }
         Commands::Status { task, detailed, watch } =>
             handle_status(&cli, task, *detailed, *watch).await,
         Commands::Pause { task } =>
