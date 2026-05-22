@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'pcr-target-tikv'
+    static_configs:
+      - targets: ['127.0.0.1:20180']
+  - job_name: 'pcr-source-tikv'
+    static_configs:
+      - targets: ['127.0.0.1:40185']
+  - job_name: 'pcr-target-tidb'
+    static_configs:
+      - targets: ['127.0.0.1:10081']
+  - job_name: 'pcr-source-tidb'
+    static_configs:
+      - targets: ['127.0.0.1:10082']
