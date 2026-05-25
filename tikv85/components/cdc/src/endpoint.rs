@@ -1537,6 +1537,7 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta + Send> Runnable
                         );
                     }
                 }
+                self.pcr_registry.clear();
                 self.pcr_registry.register(sub);
                 info!("PCR: span subscription registered";
                     "matched_delegates" => self.capture_regions.len());

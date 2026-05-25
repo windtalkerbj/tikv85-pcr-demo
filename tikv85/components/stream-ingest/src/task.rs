@@ -468,7 +468,7 @@ async fn run_event_loop<E: KvEngine>(
     // START TRANSACTION — each new session gets a fresh PD TSO allocation,
     // rapidly advancing the target PD clock past replicated commit_ts.
     let mut tso_bump = tokio::time::interval(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(1),
     );
     // Spawn per-region ingest workers. Each owns a batcher and processes
     // a subset of regions (region_id % INGEST_WORKERS). The main tx stays
@@ -556,14 +556,14 @@ async fn run_event_loop<E: KvEngine>(
                         }
                     }
                 }
-                // Bump target TiDB schema version so new tables become visible.
-                if !new_spans.is_empty() {
-                    components.schema_sync.bump_schema();
-                }
+                // Bump target TiDB schema version so replicated DDL metadata
+                // (new tables, columns, indexes) becomes visible on target.
+                // Bumped every cycle — TiDB reloads schema when version changes.
+                components.schema_sync.bump_schema();
             }
             _ = tso_bump.tick() => {
                 use pd_client::PdClient;
-                let _ = components.ingest_ctx.pd_client().batch_get_tso(100_000).await;
+                let _ = components.ingest_ctx.pd_client().batch_get_tso(500_000).await;
             }
             _ = cutover_check.tick() => {
                 // Update cutover progress metric (0-100%)
@@ -659,9 +659,23 @@ async fn run_event_loop<E: KvEngine>(
                     Some(event_with_meta) => {
                         let region_id = event_with_meta.region_id;
                         let has_kv = event_with_meta.event.has_kv_batch();
+                        let key_summary = if has_kv {
+                            let kvs = event_with_meta.event.get_kv_batch().get_kvs();
+                            let total = kvs.len();
+                            let mut prefixes: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+                            for kv in kvs.iter().take(50) {
+                                let k = kv.get_key();
+                                let prefix = format!("{:02x?}", &k[..std::cmp::min(k.len(), 4)]);
+                                *prefixes.entry(prefix).or_insert(0) += 1;
+                            }
+                            format!("{}kvs {:?}", total, prefixes)
+                        } else {
+                            String::new()
+                        };
                         info!("PCR: event received";
                             "region_id" => region_id,
                             "has_kv_batch" => has_kv,
+                            "key_summary" => key_summary,
                         );
                         STREAM_INGEST_METRICS
                             .bridge_liveness
@@ -785,6 +799,16 @@ impl<E: KvEngine> StreamIngestTask<E> {
         let state_file = data_dir.into().join("pcr_task_state");
         let state = Self::load_persisted_state(&state_file, cfg.enable);
         let cutover_ts = Arc::new(AtomicU64::new(0));
+        // Initialize metrics gauge to reflect loaded state
+        {
+            let v = match state {
+                TaskState::Idle => 0u8, TaskState::Subscribing => 1u8,
+                TaskState::Paused => 2u8, TaskState::CuttingOver => 3u8,
+                TaskState::Completed => 4u8, TaskState::Activated => 5u8,
+                TaskState::Failed => 6u8,
+            };
+            STREAM_INGEST_METRICS.set_state(v);
+        }
 
         let ingest_ctx = Arc::new(DirectIngestContext::new(
             engine,
@@ -823,7 +847,7 @@ impl<E: KvEngine> StreamIngestTask<E> {
             target_tidb_addr: cfg.target_tidb_address.clone(),
             source_tidb_addr: String::from("127.0.0.1:4100"),
             span_mode: false,
-            schema_sync: SchemaSync::new("127.0.0.1:3380".to_string()),
+            schema_sync: SchemaSync::new("127.0.0.1:3380".to_string(), "4101".to_string(), "4100".to_string(), "127.0.0.1:3379".to_string()),
         };
 
         // Create a dedicated multi-threaded tokio runtime for the PCR event loop.
@@ -848,7 +872,7 @@ impl<E: KvEngine> StreamIngestTask<E> {
             cancel_tx: None,
             done_rx: None,
             cutover_ts,
-            schema_sync: SchemaSync::new("127.0.0.1:3380".to_string()),
+            schema_sync: SchemaSync::new("127.0.0.1:3380".to_string(), "4101".to_string(), "4100".to_string(), "127.0.0.1:3379".to_string()),
             write_guard,
             source_pd,
         }
@@ -896,7 +920,7 @@ impl<E: KvEngine> StreamIngestTask<E> {
             target_tidb_addr: self.cfg.target_tidb_address.clone(),
             source_tidb_addr: String::from("127.0.0.1:4100"),
             span_mode: false,
-            schema_sync: SchemaSync::new("127.0.0.1:3380".to_string()),
+            schema_sync: SchemaSync::new("127.0.0.1:3380".to_string(), "4101".to_string(), "4100".to_string(), "127.0.0.1:3379".to_string()),
         }
     }
 

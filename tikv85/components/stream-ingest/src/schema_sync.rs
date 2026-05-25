@@ -105,17 +105,58 @@ pub fn bump_target_schema_version(target_pd: &str) {
 
 pub struct SchemaSync {
     target_pd: String,
+    source_pd: String,
+    last_synced_version: u64,
 }
 
 impl SchemaSync {
-    pub fn new(target_pd: String) -> Self {
-        Self { target_pd }
+    pub fn new(target_pd: String, _target_tidb: String, _source_tidb: String, source_pd: String) -> Self {
+        Self { target_pd, source_pd, last_synced_version: 0 }
     }
 
-    /// Call after DDL discover creates new table spans. Bumps the target
-    /// TiDB schema version so newly replicated system-table metadata
-    /// (mysql.tidb, mysql.columns, etc.) becomes visible.
-    pub fn bump_schema(&self) {
-        bump_target_schema_version(&self.target_pd);
+    /// Read source PD schema version (shell out for base64 + curl).
+    fn read_pd_schema_version(pd_addr: &str) -> u64 {
+        let script = r#"
+k=$(printf '/tidb/ddl/global_schema_version' | base64)
+r=$(curl -sf -X POST "http://PLACEHOLDER/v3/kv/range" -d "{\"key\":\"$k\"}" 2>/dev/null)
+v=$(echo "$r" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['kvs'][0]['value'])" 2>/dev/null)
+[ -n "$v" ] && echo "$v" | base64 -d 2>/dev/null
+"#.replace("PLACEHOLDER", pd_addr);
+        let output = std::process::Command::new("bash")
+            .args(&["-c", &script])
+            .output();
+        match output {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0),
+            Err(_) => 0,
+        }
+    }
+
+    /// Sync source PD schema version to target PD key.
+    pub fn bump_schema(&mut self) {
+        let src_version = Self::read_pd_schema_version(&self.source_pd);
+        if src_version == 0 || src_version <= self.last_synced_version {
+            return;
+        }
+        self.last_synced_version = src_version;
+
+        let put_url = format!("http://{}/pd/api/v1/kv/put", self.target_pd);
+        let body = format!(
+            r#"{{"key":"/tidb/ddl/global_schema_version","value":"{:016x}"}}"#,
+            src_version
+        );
+        let _ = std::process::Command::new("curl")
+            .args(&["-s", "-X", "POST", &put_url, "-d", &body])
+            .output();
+
+        slog_global::info!("PCR schema sync: synced target schema version from source";
+            "src_version" => src_version);
+    }
+
+    fn mysql_count(port: &str, query: &str) -> u64 {
+        std::process::Command::new("mysql")
+            .args(&["-u", "root", "-h", "127.0.0.1", "-P", port, "-N", "-e", query])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0))
+            .unwrap_or(0)
     }
 }

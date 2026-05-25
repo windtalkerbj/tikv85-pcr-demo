@@ -9,6 +9,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use engine_traits::Peekable;
 use futures::{SinkExt, StreamExt};
 use grpcio::*;
 use slog_global::{error, info, warn};
@@ -87,39 +88,74 @@ impl SpanBridge {
             futures::channel::mpsc::unbounded::<Vec<u8>>();
         let shared_sink = Arc::new(fut_tx);
 
+        // Shared relay counters survive per-instance relay restarts.
+        // Without these, the 30s heartbeat always reports 0 because the
+        // relay instance that processed events already exited.
+        let relay_events: Arc<std::sync::atomic::AtomicU64> = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let relay_parse_ok: Arc<std::sync::atomic::AtomicU64> = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let relay_parse_fail: Arc<std::sync::atomic::AtomicU64> = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
         // Relay: collect up to 64 events or 1ms, then batch-send to merge.
         // This amortizes per-event Tokio wakeup across the merge channel.
         let relay_tx = merge_tx.clone();
+        let r_events = relay_events.clone();
+        let r_ok = relay_parse_ok.clone();
+        let r_fail = relay_parse_fail.clone();
         bridge_rt.spawn(async move {
             let mut buf: Vec<PcrEvent> = Vec::with_capacity(64);
+            let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
-                // Wait for first event with no timeout
-                let first = match fut_rx.next().await {
-                    Some(data) => data,
-                    None => break,
-                };
-                if let Ok(event) = protobuf::parse_from_bytes::<PcrEvent>(&first) {
-                    buf.push(event);
-                }
-                // Drain remaining events with 1ms timeout
-                loop {
-                    match tokio::time::timeout(
-                        std::time::Duration::from_millis(1),
-                        fut_rx.next(),
-                    ).await
-                    {
-                        Ok(Some(data)) => {
-                            if let Ok(event) = protobuf::parse_from_bytes::<PcrEvent>(&data) {
-                                buf.push(event);
-                            }
-                            if buf.len() >= 64 { break; }
+                tokio::select! {
+                    first_data = fut_rx.next() => {
+                        let first = match first_data {
+                            Some(data) => data,
+                            None => break,
+                        };
+                        if let Ok(event) = protobuf::parse_from_bytes::<PcrEvent>(&first) {
+                            buf.push(event);
+                            r_ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        } else {
+                            r_fail.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
-                        _ => break, // timeout or channel closed
+                        // Drain remaining events with 1ms timeout
+                        loop {
+                            match tokio::time::timeout(
+                                std::time::Duration::from_millis(1),
+                                fut_rx.next(),
+                            ).await
+                            {
+                                Ok(Some(data)) => {
+                                    if let Ok(event) = protobuf::parse_from_bytes::<PcrEvent>(&data) {
+                                        buf.push(event);
+                                        r_ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    } else {
+                                        r_fail.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    if buf.len() >= 64 { break; }
+                                }
+                                _ => break,
+                            }
+                        }
+                        if !buf.is_empty() {
+                            let batch = std::mem::take(&mut buf);
+                            r_events.fetch_add(batch.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                            if relay_tx.send(batch).await.is_err() {
+                                warn!("PCR relay: merge_tx send failed, exiting";
+                                    "events_processed" => r_events.load(std::sync::atomic::Ordering::Relaxed),
+                                    "parse_ok" => r_ok.load(std::sync::atomic::Ordering::Relaxed),
+                                    "parse_fail" => r_fail.load(std::sync::atomic::Ordering::Relaxed),
+                                );
+                                break;
+                            }
+                        }
                     }
-                }
-                if !buf.is_empty() {
-                    let batch = std::mem::take(&mut buf);
-                    if relay_tx.send(batch).await.is_err() { break; }
+                    _ = heartbeat.tick() => {
+                        info!("PCR relay: heartbeat";
+                            "events_processed" => r_events.load(std::sync::atomic::Ordering::Relaxed),
+                            "parse_ok" => r_ok.load(std::sync::atomic::Ordering::Relaxed),
+                            "parse_fail" => r_fail.load(std::sync::atomic::Ordering::Relaxed),
+                        );
+                    }
                 }
             }
         });
@@ -237,6 +273,87 @@ impl SpanBridge {
                             }
                         }
                     }
+                    // Refresh span subscription: re-register with a fresh
+                    // shared_sink + relay so delegates that lost their channel
+                    // (gRPC disconnect) get live senders again.
+                    {
+                        let (fut_tx2, mut fut_rx2) =
+                            futures::channel::mpsc::unbounded::<Vec<u8>>();
+                        let shared_sink2 = Arc::new(fut_tx2);
+                        let relay_tx2 = merge_tx.clone();
+                        let r_events = relay_events.clone();
+                        let r_ok = relay_parse_ok.clone();
+                        let r_fail = relay_parse_fail.clone();
+                        let bridge_rt3 = bridge_rt.clone();
+                        bridge_rt3.spawn(async move {
+                            let mut buf: Vec<PcrEvent> = Vec::with_capacity(64);
+                            let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
+                            loop {
+                                tokio::select! {
+                                    first_data = fut_rx2.next() => {
+                                        let first = match first_data {
+                                            Some(data) => data,
+                                            None => break,
+                                        };
+                                        if let Ok(event) = protobuf::parse_from_bytes::<PcrEvent>(&first) {
+                                            buf.push(event);
+                                            r_ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        } else {
+                                            r_fail.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        loop {
+                                            match tokio::time::timeout(
+                                                std::time::Duration::from_millis(1),
+                                                fut_rx2.next(),
+                                            ).await
+                                            {
+                                                Ok(Some(data)) => {
+                                                    if let Ok(event) = protobuf::parse_from_bytes::<PcrEvent>(&data) {
+                                                        buf.push(event);
+                                                        r_ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                    } else {
+                                                        r_fail.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                    }
+                                                    if buf.len() >= 64 { break; }
+                                                }
+                                                _ => break,
+                                            }
+                                        }
+                                        if !buf.is_empty() {
+                                            let batch = std::mem::take(&mut buf);
+                                            r_events.fetch_add(batch.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                                            if relay_tx2.send(batch).await.is_err() {
+                                                warn!("PCR relay(reconnect): merge_tx send failed, exiting";
+                                                    "events_processed" => r_events.load(std::sync::atomic::Ordering::Relaxed),
+                                                    "parse_ok" => r_ok.load(std::sync::atomic::Ordering::Relaxed),
+                                                    "parse_fail" => r_fail.load(std::sync::atomic::Ordering::Relaxed),
+                                                );
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    _ = heartbeat.tick() => {
+                                        info!("PCR relay(reconnect): heartbeat";
+                                            "events_processed" => r_events.load(std::sync::atomic::Ordering::Relaxed),
+                                            "parse_ok" => r_ok.load(std::sync::atomic::Ordering::Relaxed),
+                                            "parse_fail" => r_fail.load(std::sync::atomic::Ordering::Relaxed),
+                                        );
+                                    }
+                                }
+                            }
+                        });
+                        let task = Task::RegisterSpanSubscription {
+                            start_key: self.span_start.clone(),
+                            end_key: self.span_end.clone(),
+                            shared_sink: shared_sink2,
+                            event_buffer_size,
+                            event_flush_interval_ms,
+                        };
+                        if let Err(e) = scheduler.schedule(task) {
+                            error!("PCR span_bridge: failed to re-register";
+                                "error" => ?e);
+                        }
+                    }
                 }
             }
         }
@@ -284,8 +401,88 @@ impl SpanBridge {
 
             let (n1, n2);
             if is_full {
-                n1 = crate::pcr_snapshot::stream_cf_full(engine, "default", OpType::Put, |k, v| add_kv("default", OpType::Put, k, v));
-                n2 = crate::pcr_snapshot::stream_cf_full(engine, "write", OpType::Put, |k, v| add_kv("write", OpType::Put, k, v));
+                let def_count = std::sync::atomic::AtomicU64::new(0);
+                let write_count = std::sync::atomic::AtomicU64::new(0);
+                // Count short_value availability for meta key WriteRefs
+                let has_sv = std::sync::atomic::AtomicU64::new(0);
+                let no_sv = std::sync::atomic::AtomicU64::new(0);
+                n1 = crate::pcr_snapshot::stream_cf_full(engine, "default", OpType::Put, |k, v| {
+                    def_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    add_kv("default", OpType::Put, k, v);
+                });
+                n2 = crate::pcr_snapshot::stream_cf_full(engine, "write", OpType::Put, |k, v| {
+                    write_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if k.windows(5).any(|w| w == b"mDB:1") {
+                        // Parse WriteRef to find short_value and synthesize DEFAULT CF
+                        let mut pos = 1; // skip write_type
+                        while pos < v.len() && (v[pos] & 0x80) != 0 { pos += 1; }
+                        pos += 1; // skip final var_u64 byte
+                        if pos < v.len() && v[pos] == 0x76 {
+                            has_sv.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            pos += 1; // skip SHORT_VALUE_PREFIX
+                            if pos < v.len() {
+                                let sv_len = v[pos] as usize;
+                                pos += 1;
+                                if pos + sv_len <= v.len() {
+                                    let short_val = &v[pos..pos + sv_len];
+                                    // Synthesize DEFAULT CF key:
+                                    // WRITE CF key = z + raw_key + !commit_ts (8B)
+                                    // DEFAULT CF key = raw_key + !start_ts
+                                    // The WriteRef start_ts is in the first bytes of v (as var_u64),
+                                    // compute it as u64 to form !start_ts
+                                    let sv_start_ts = {
+                                        let mut p = 1; let mut val: u64 = 0;
+                                        while p < v.len() {
+                                            let b = v[p]; p += 1;
+                                            val = (val << 7) | ((b & 0x7F) as u64);
+                                            if (b & 0x80) == 0 { break; }
+                                        }
+                                        !val // inverted TS for DEFAULT CF key
+                                    };
+                                    if k.len() >= 9 {
+                                        // raw_prefix = k without z-prefix and !commit_ts suffix
+                                        let raw_prefix = &k[1..k.len()-8];
+                                        let mut def_key = Vec::with_capacity(raw_prefix.len() + 8);
+                                        def_key.extend_from_slice(raw_prefix);
+                                        def_key.extend_from_slice(&sv_start_ts.to_be_bytes());
+                                        add_kv("default", OpType::Put, def_key, short_val.to_vec());
+                                    }
+                                }
+                            }
+                        } else {
+                            no_sv.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            // No short_value: read DEFAULT CF from source RocksDB at start_ts
+                            if k.len() >= 9 {
+                                let raw_prefix = &k[1..k.len()-8]; // strip z-prefix and !commit_ts
+                                let sv_start_ts = {
+                                    let mut p = 1; let mut val: u64 = 0;
+                                    while p < v.len() {
+                                        let b = v[p]; p += 1;
+                                        val = (val << 7) | ((b & 0x7F) as u64);
+                                        if (b & 0x80) == 0 { break; }
+                                    }
+                                    val
+                                };
+                                // Read DEFAULT CF from source RocksDB
+                                let mut def_key = Vec::with_capacity(raw_prefix.len() + 8);
+                                def_key.extend_from_slice(raw_prefix);
+                                def_key.extend_from_slice(&(!sv_start_ts).to_be_bytes());
+                                if let Ok(Some(def_val)) = engine.get_value_cf("default", &def_key) {
+                                    let def_bytes = def_val.to_vec();
+                                    add_kv("default", OpType::Put, def_key, def_bytes);
+                                }
+                            }
+                        }
+                    }
+                    add_kv("write", OpType::Put, k, v);
+                });
+                info!("PCR full scan: meta key short_value stats";
+                    "region_id" => region_id,
+                    "default_kvs" => def_count.load(std::sync::atomic::Ordering::Relaxed),
+                    "write_kvs" => write_count.load(std::sync::atomic::Ordering::Relaxed),
+                    "has_short_value" => has_sv.load(std::sync::atomic::Ordering::Relaxed),
+                    "no_short_value" => no_sv.load(std::sync::atomic::Ordering::Relaxed),
+                );
             } else {
                 n1 = 0; n2 = 0;
                 // Delta: use existing scan_delta_entries (not streaming-critical yet)

@@ -603,18 +603,18 @@ impl Delegate {
                 .unwrap_or(0);
             match sink.unbounded_send(event) {
                 Ok(()) => {
-                    debug!("cdc: PCR event sent to gRPC sink";
+                    info!("cdc: PCR event sent to gRPC sink";
                         "region_id" => self.region_id,
                         "bytes" => event_len,
                         "kv_count" => diag_kv_count,
                     );
                 }
                 Err(e) => {
-                    // Disconnected — SpanBridge may reconnect and call
-                    // enable_pcr() with a new sink later. Keep the batcher
-                    // and accumulated KVs so no data is lost.
-                    self.pcr_event_sink = None;
-                    warn!("cdc: PCR event sink disconnected, awaiting reconnect";
+                    // Sink disconnected: keep the dead sender so enable_pcr()
+                    // can replace it when the span subscription is re-registered.
+                    // enable_pcr checks had_sink (via is_some()) and logs REPLACING.
+                    // Batcher + accumulated KVs are preserved — no data loss.
+                    warn!("cdc: PCR event sink disconnected, will retry on next subscription refresh";
                         "region_id" => self.region_id,
                         "batcher_size" => self.pcr_batcher.as_ref().map(|b| b.size()).unwrap_or(0),
                         "error" => ?e,
@@ -1028,6 +1028,23 @@ impl Delegate {
 
         let mut rows_builder = RowsBuilder::default();
         rows_builder.is_one_pc = flags.contains(WriteBatchFlags::ONE_PC);
+        if self.pcr_batcher.is_some() {
+            let types: Vec<&str> = requests.iter().map(|r| {
+                match r.get_cmd_type() {
+                    CmdType::Put => "Put",
+                    CmdType::Prewrite => "Prewrite",
+                    CmdType::Delete => "Delete",
+                    CmdType::DeleteRange => "DeleteRange",
+                    CmdType::IngestSst => "IngestSst",
+                    _ => "Other",
+                }
+            }).collect();
+            info!("PCR: sink_data batch";
+                "region_id" => self.region_id,
+                "cmd_types" => ?types,
+                "count" => requests.len(),
+            );
+        }
         for mut req in requests {
             let cmd_type = req.get_cmd_type();
             match cmd_type {
@@ -1084,16 +1101,23 @@ impl Delegate {
                     let start_ts = Lock::parse(&lock_bytes)
                         .map(|l| l.ts)
                         .unwrap_or_default();
-                    // Build RocksDB key in API v1 format: z + raw_key + ts_suffix.
-                    // Key::from_raw() would memcomparable-encode the raw key,
-                    // which doesn't match the RocksDB key format. The scan path
-                    // reads keys directly from RocksDB in this exact format.
                     let mut encoded_key = Vec::with_capacity(1 + raw_key.len() + 8);
                     encoded_key.push(b'z');
                     encoded_key.extend_from_slice(raw_key.as_slice());
                     encoded_key.extend_from_slice(&(!start_ts.into_inner()).to_be_bytes());
+                    let key_prefix = format!("{:02x?}", &raw_key[..std::cmp::min(raw_key.len(), 12)]);
                     if let Some(ref mut batcher) = self.pcr_batcher {
+                        info!("PCR: Prewrite captured";
+                            "region_id" => self.region_id,
+                            "key_prefix" => &key_prefix,
+                            "value_len" => value.len(),
+                        );
                         batcher.add_kv(encoded_key, value, OpType::Put, "default");
+                    } else {
+                        info!("PCR: Prewrite SKIPPED — no batcher";
+                            "region_id" => self.region_id,
+                            "key_prefix" => &key_prefix,
+                        );
                     }
                 }
 
@@ -1360,6 +1384,11 @@ impl Delegate {
             if put.get_cf() == "lock" {
                 // LOCK CF skipped — not committed state.
             } else if put.get_cf() == "write" {
+                let key_preview = format!("{:02x?}", &put.get_key()[..std::cmp::min(put.get_key().len(), 8)]);
+                info!("PCR: sink_raw_put write CF";
+                    "region_id" => self.region_id,
+                    "key_prefix" => &key_preview,
+                );
                 let result = LogicalMutation::from_write_cf(put.get_key(), put.get_value());
                 if let Some(mutation) = result {
                     match mutation {
@@ -1368,9 +1397,16 @@ impl Delegate {
                                 batcher.add_kv(default_key, val.clone(), OpType::Put, "default");
                             } else {
                                 // Large value: read DEFAULT CF at start_ts.
+                                PCR_PRODUCER_METRICS.short_value_missing_count.inc();
                                 let dk = Key::from_encoded(default_key.clone());
                                 if let Ok(Some(val)) = old_value_cb(dk, start_ts, old_value_cache, statistics) {
                                     batcher.add_kv(default_key, val, OpType::Put, "default");
+                                } else {
+                                    PCR_PRODUCER_METRICS.old_value_cb_failures.inc();
+                                    info!("PCR: old_value_cb failed";
+                                        "region_id" => self.region_id,
+                                        "start_ts" => start_ts.into_inner(),
+                                    );
                                 }
                             }
                             let mut wk = Vec::with_capacity(1 + write_key.len());
@@ -1389,10 +1425,37 @@ impl Delegate {
                     }
                 } else {
                     PCR_PRODUCER_METRICS.write_ref_parse_fallbacks.inc();
-                    let mut key = Vec::with_capacity(1 + put.get_key().len());
-                    key.push(b'z');
-                    key.extend_from_slice(put.get_key());
-                    batcher.add_kv(key, put.get_value().to_vec(), OpType::Put, put.get_cf());
+                    let raw_key = put.get_key();
+                    let value = put.get_value().to_vec();
+                    let kp = format!("{:02x?}", &raw_key[..std::cmp::min(raw_key.len(), 8)]);
+                    let vp = format!("{:02x?}", &value[..std::cmp::min(value.len(), 16)]);
+                    info!("PCR: WriteRef parse fallback (txn)";
+                        "region_id" => self.region_id,
+                        "key_prefix" => &kp, "val_prefix" => &vp);
+                    // WRITE CF: z-prefixed key + raw value
+                    let mut wk = Vec::with_capacity(1 + raw_key.len());
+                    wk.push(b'z');
+                    wk.extend_from_slice(raw_key);
+                    batcher.add_kv(wk, value.clone(), OpType::Put, "write");
+                    // DEFAULT CF: extract data_key from WRITE CF key (remove !commit_ts suffix),
+                    // parse start_ts from WriteRef value, construct z + data_key + !start_ts
+                    if raw_key.len() >= 8 {
+                        let data_key = &raw_key[..raw_key.len()-8];
+                        let start_ts = {
+                            let mut p = 1; let mut val: u64 = 0;
+                            while p < value.len() {
+                                let b = value[p]; p += 1;
+                                val = (val << 7) | ((b & 0x7F) as u64);
+                                if (b & 0x80) == 0 { break; }
+                            }
+                            !val
+                        };
+                        let mut dk = Vec::with_capacity(1 + data_key.len() + 8);
+                        dk.push(b'z');
+                        dk.extend_from_slice(data_key);
+                        dk.extend_from_slice(&start_ts.to_be_bytes());
+                        batcher.add_kv(dk, value, OpType::Put, "default");
+                    }
                 }
             }
             // DEFAULT CF puts (cf="" or "default") are NOT replicated.
@@ -1425,9 +1488,16 @@ impl Delegate {
                             if let Some(ref val) = short_value {
                                 batcher.add_kv(default_key, val.clone(), OpType::Put, "default");
                             } else {
+                                PCR_PRODUCER_METRICS.short_value_missing_count.inc();
                                 let dk = Key::from_encoded(default_key.clone());
                                 if let Ok(Some(val)) = old_value_cb(dk, start_ts, old_value_cache, statistics) {
                                     batcher.add_kv(default_key, val, OpType::Put, "default");
+                                } else {
+                                    PCR_PRODUCER_METRICS.old_value_cb_failures.inc();
+                                    info!("PCR: old_value_cb failed (txn)";
+                                        "region_id" => self.region_id,
+                                        "start_ts" => start_ts.into_inner(),
+                                    );
                                 }
                             }
                             let mut wk = Vec::with_capacity(1 + write_key.len());
@@ -1446,10 +1516,32 @@ impl Delegate {
                     }
                 } else {
                     PCR_PRODUCER_METRICS.write_ref_parse_fallbacks.inc();
-                    let mut key = Vec::with_capacity(1 + put.get_key().len());
-                    key.push(b'z');
-                    key.extend_from_slice(put.get_key());
-                    batcher.add_kv(key, put.get_value().to_vec(), OpType::Put, put.get_cf());
+                    let raw_key = put.get_key();
+                    let value = put.get_value().to_vec();
+                    // WRITE CF: z-prefixed key + raw value
+                    let mut wk = Vec::with_capacity(1 + raw_key.len());
+                    wk.push(b'z');
+                    wk.extend_from_slice(raw_key);
+                    batcher.add_kv(wk, value.clone(), OpType::Put, "write");
+                    // DEFAULT CF: extract data_key from WRITE CF key (remove !commit_ts suffix),
+                    // parse start_ts from WriteRef value, construct z + data_key + !start_ts
+                    if raw_key.len() >= 8 {
+                        let data_key = &raw_key[..raw_key.len()-8];
+                        let start_ts = {
+                            let mut p = 1; let mut val: u64 = 0;
+                            while p < value.len() {
+                                let b = value[p]; p += 1;
+                                val = (val << 7) | ((b & 0x7F) as u64);
+                                if (b & 0x80) == 0 { break; }
+                            }
+                            !val
+                        };
+                        let mut dk = Vec::with_capacity(1 + data_key.len() + 8);
+                        dk.push(b'z');
+                        dk.extend_from_slice(data_key);
+                        dk.extend_from_slice(&start_ts.to_be_bytes());
+                        batcher.add_kv(dk, value, OpType::Put, "default");
+                    }
                 }
             }
             // DEFAULT CF puts (cf="" or "default") are NOT replicated —
