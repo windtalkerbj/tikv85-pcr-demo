@@ -2358,7 +2358,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc 0.2.176",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.0",
 ]
 
 [[package]]
@@ -5282,7 +5282,7 @@ dependencies = [
 [[package]]
 name = "raft-engine"
 version = "0.4.2"
-source = "git+https://github.com/tikv/raft-engine.git?branch=tikv-8.5#2f9f6888dc2c88d3e2b582187c26e196b88b8ef3"
+source = "git+https://github.com/tikv/raft-engine.git?rev=2f9f6888dc2c88d3e2b582187c26e196b88b8ef3#2f9f6888dc2c88d3e2b582187c26e196b88b8ef3"
 dependencies = [
  "byteorder",
  "crc32fast",
@@ -5316,7 +5316,7 @@ dependencies = [
 [[package]]
 name = "raft-engine-ctl"
 version = "0.4.2"
-source = "git+https://github.com/tikv/raft-engine.git?branch=tikv-8.5#2f9f6888dc2c88d3e2b582187c26e196b88b8ef3"
+source = "git+https://github.com/tikv/raft-engine.git?rev=2f9f6888dc2c88d3e2b582187c26e196b88b8ef3#2f9f6888dc2c88d3e2b582187c26e196b88b8ef3"
 dependencies = [
  "clap 3.1.6",
  "env_logger 0.10.0",
