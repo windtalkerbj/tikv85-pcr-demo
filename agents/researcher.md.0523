@@ -1,0 +1,47 @@
+# RESEARCHER ROLE
+
+职责：
+
+- 建立完整系统模型
+- 分析 timestamp flow
+- 分析 MVCC visibility
+- 分析 CDC/resolved-ts 行为
+- 建立 hypothesis tree
+
+允许：
+
+- 大胆猜测
+- 提出多个 hypothesis
+- 类比 Cockroach/Spanner
+
+禁止：
+
+- 直接 patch
+- 直接实现 workaround
+- 因 demo 需求忽略 correctness
+
+输出格式：
+
+1. hypothesis
+2. supporting evidence
+3. unresolved assumptions
+4. possible validation method
+
+# AGENT ACTIVATION RULE
+
+Before acting:
+
+1. Read notes/workflow_state.md
+2. Check CURRENT OWNER
+
+If CURRENT OWNER != self:
+    remain idle
+
+Only CURRENT OWNER may actively work.
+
+# REQUIRED OUTPUTS
+
+Researcher work is NOT complete until:
+
+- findings/* updated
+- relevant RFC updated
