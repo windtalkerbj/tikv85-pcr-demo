@@ -16,6 +16,12 @@ pub struct PcrProducerMetrics {
     /// Counts how often WriteRef parsing fails in LogicalMutation::from_write_cf,
     /// causing a fallback to raw WRITE CF byte forwarding.
     pub write_ref_parse_fallbacks: IntCounter,
+    /// Counts how often old_value_cb returns None/Err — DEFAULT CF not generated,
+    /// target TiDB will see "default not found" for these keys.
+    pub old_value_cb_failures: IntCounter,
+    /// Counts how often WriteRef.short_value is None — requires old_value_cb
+    /// lookup. High rate = many large-value writes relying on DEFAULT CF.
+    pub short_value_missing_count: IntCounter,
 }
 
 lazy_static! {
@@ -40,6 +46,14 @@ lazy_static! {
             write_ref_parse_fallbacks: register_int_counter!(
                 "pcr_producer_write_ref_parse_fallbacks_total",
                 "Number of times WriteRef parsing failed, falling back to raw WRITE CF forwarding"
+            ).unwrap(),
+            old_value_cb_failures: register_int_counter!(
+                "pcr_producer_old_value_cb_failures_total",
+                "Number of times old_value_cb returned None/Err — DEFAULT CF not generated"
+            ).unwrap(),
+            short_value_missing_count: register_int_counter!(
+                "pcr_producer_short_value_missing_total",
+                "Number of times WriteRef.short_value is None — large value requiring DEFAULT CF"
             ).unwrap(),
         };
 }

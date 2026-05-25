@@ -448,3 +448,120 @@ CLAUDE.md 仅用于记录**长期稳定规则**。更新前必须判断层级：
 | 问题追踪 | `develop/ISSUES.md` |
 | 最近调试记录 | session memory（mem0） |
 
+# ROLE RULES
+
+Researcher:
+- 允许大胆 hypothesis
+- 禁止直接 patch
+- 禁止过早收敛
+
+Reviewer:
+- 专门寻找 consistency hole
+- 禁止直接给 workaround
+- 必须优先攻击 hidden assumption
+
+Builder:
+- 只能基于 reviewer 审查后的结论开发
+- 必须补 regression test
+- 必须说明 tradeoff
+
+# WORKFLOW STATE MACHINE
+
+## Research Phase
+
+Owner:
+- Researcher
+
+Exit Condition:
+- hypothesis formed
+- findings documented
+
+Next:
+- Reviewer
+
+
+## Review Phase
+
+Owner:
+- Reviewer
+
+Exit Condition:
+- consistency review complete
+- unresolved risks identified
+
+Next:
+- Builder
+
+
+## Build Phase
+
+Owner:
+- Builder
+
+Allowed:
+- patch
+- compile
+- regression test
+- integration test
+
+Exit Condition:
+- build success
+- regression complete
+
+Next:
+- Reviewer semantic validation
+
+
+## Semantic Validation Phase
+
+Owner:
+- Reviewer
+
+Focus:
+- MVCC correctness
+- visibility semantics
+- snapshot isolation
+- tso consistency
+
+Exit Condition:
+- semantic consistency accepted
+
+Next:
+- closed OR Researcher if anomaly found
+
+
+## Reopen Research
+
+Triggered When:
+- unexpected behavior
+- unexplained regression
+- model inconsistency
+
+# VALIDATION RULE
+
+Validation phase is owned by Builder.
+
+Reviewer only validates semantics.
+
+Researcher remains idle unless:
+- unexplained anomaly
+- consistency contradiction
+- architecture-level inconsistency appears.
+
+# ARTIFACT RULES
+
+Researcher MUST produce:
+- findings/*
+- rfc/* (if architecture decision involved)
+
+Reviewer MUST produce:
+- reviews/*
+
+Builder MUST produce:
+- docs/*
+- testplan/*
+- implementation notes
+
+Conversation alone does NOT count as completed work.
+
+All important conclusions MUST persist to filesystem artifacts.

@@ -6,9 +6,9 @@
 
 10K INSERT 150s 收敛延迟。根因：单 relay task 串行 parse all delegate events。PcrEventBatcher 已具备 1MB/150ms 双阈值 delegate 端聚合，进一步优化（byte forwarding、multi-relay）对 Demo ROI 低。接受为 Demo 级延迟，文档标注。
 
-### #8. 大值 live CDC 路径（正确性）
+### #8. 大值 live CDC 路径（已解决 ✅）
 
-WriteRef.short_value = None（>255B）时，live CDC 不复制 DEFAULT CF 值。需在 Commit 时从 RocksDB snapshot 读取 DEFAULT CF at start_ts。TPCC CUSTOMER.c_data(500B) 触发。
+WriteRef.short_value = None（>255B）时，通过 `old_value_cb` 回查 DEFAULT CF at start_ts。WRITE CF commit 为唯一复制入口，消除 phantom row 风险。
 
 ### #9. TRUNCATE / DeleteRange 旧数据清理（架构边界，非 bug）
 
