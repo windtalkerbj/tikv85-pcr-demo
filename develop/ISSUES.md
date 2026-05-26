@@ -2,6 +2,16 @@
 
 ## 开放
 
+### #10. FullLoad 在 mDB key 上 DefaultNotFound（阻塞 ALTER TABLE 在线可见）
+
+**状态**: 开放，待修
+**影响**: schema reload 的 FullLoad 路径反复失败，diff load 可处理 CREATE TABLE 但 ALTER TABLE 版本跨度过大时 fallback 到 FullLoad → 失败
+**根因**: span_bridge.rs full scan no_short_value fallback 用 WriteRef metadata 作为 DEFAULT CF 值写入 target RocksDB。TiDB 读 WRITE CF → WriteRef 有 short_value → 但某个代码路径绕过 short_value 直接读 DEFAULT CF → 值错误或 key 不存在
+**临时方案**: 重启 TiDB 后可见（重启时 FullLoad 使用新的 snapshot，部分 key 已通过 live CDC 修复）
+**方向**: 修 span_bridge.rs fallback 的 DEFAULT CF 值，或让 TiDB schema reload 在 DefaultNotFound 时跳过单 key 继续
+
+---
+
 ### #7. Relay 批量化（Demo 接受）
 
 10K INSERT 150s 收敛延迟。根因：单 relay task 串行 parse all delegate events。PcrEventBatcher 已具备 1MB/150ms 双阈值 delegate 端聚合，进一步优化（byte forwarding、multi-relay）对 Demo ROI 低。接受为 Demo 级延迟，文档标注。

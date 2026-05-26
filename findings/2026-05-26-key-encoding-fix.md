@@ -1,78 +1,86 @@
-# Finding: live CDC 路径 key 编码与 full scan 路径不一致
+# Finding: live CDC 路径 key 编码修复（历经 3 次迭代）
 
 **Date**: 2026-05-26
 **Phase**: Build
-**Status**: ✅ Fixed & verified
+**Status**: ✅ Fixed & verified (commit `b70042a`)
 
 ---
 
 ## Root Cause
 
-CDC delegate（live CDC 路径）和 SpanBridge（full scan 路径）对 WRITE CF / DEFAULT CF 的 key 编码不同，导致 target RocksDB 上同一 key 的 WRITE CF 和 DEFAULT CF 以不同格式存储。
+两个问题叠加：
 
-### 具体问题
+### 问题 1：CDC observer key 无 `z` 前缀（被误判）
 
-**1. WRITE CF key 多 `z` 前缀**
+**事实**：CDC observer 传来的 key 是 `memcomparable(user_key) + TS`，**不带** `z` DATA_PREFIX。
+（`z` 由 `handle_put` 在 apply 写 RocksDB 时追加。）
 
-- Full scan: `add_kv("write", k, v)` — `k` 直接从 RocksDB 读取，已含 `z` 前缀
-- delegate.rs: `wk.push(b'z'); wk.extend_from_slice(&write_key)` — `write_key` 已是 RocksDB key（含 `z`），再加 `z` → `zz...`
+**后果**：delegate 必须补 `z`。原代码中 `wk.push(b'z')` 是正确的。
 
-**2. DEFAULT CF key 通过 `Key::from_raw` 重编码**
+**误判经过**：
+- 第一次分析看到 full scan 路径 key 以 `7a`（z）开头 → 认为 delegate 的 `z` 是多余的 → 删掉
+- 结果：live CDC 写入的 key 缺少 `z` 前缀，TiDB 找不到
 
-- Full scan: `raw_data + !start_ts` — `raw_data = k[..len-8]`，保留原始编码
-- delegate.rs: `Key::from_raw(user_key).append_ts(start_ts).into_encoded()` — `user_key` 已被 `truncate_ts_for` 截断但仍是编码格式，`from_raw` 对其再做 memcomparable 编码 → key 变形
+### 问题 2：`Key::from_raw` 对已 memcomparable 编码的 key 二次编码
 
-**3. mDB meta key 是触发条件**
+**事实**：`truncate_ts_for(cf_key)` 返回的 `user_key` 已是 memcomparable 编码格式。
 
-- 用户数据 key 多为 ASCII，memcomparable 编码是 identity，`from_raw` 重编码无影响
-- mDB key 含二进制编码字节（如 `\x00`, `\xff`），memcomparable 编码会变换这些字节 → key 不一致 → TiDB 读 DEFAULT CF 时 DefaultNotFound
+**原代码**：
+```rust
+let default_key = Key::from_raw(user_key)
+    .append_ts(write.start_ts)
+    .into_encoded();
+```
 
-### 证据
-
-- Source RocksDB 的 WRITE CF key 以 `z` 开头（hex `7a`）— span_bridge.rs diagnostic log 确认
-- `Key::truncate_ts_for` 返回的 `user_key` 仍含 `z` 前缀 — 注释说 "without z prefix" 与代码实际行为不符
-- TiDB 重启日志：`DefaultNotFound { key: [109, 68, 66, 58, ...] }` — `mDB:` key
+`Key::from_raw` 对 `user_key` 再做 memcomparable 编码 → 含 `\x00`/`\xff` 等字节的 mDB key 被变换 → key 不一致 → DefaultNotFound。
 
 ---
 
-## Fix
+## 最终正确修复（第 3 次迭代）
 
 ### logical_mutation.rs
 
 ```rust
-// Before (broken):
-let default_key = Key::from_raw(user_key)
-    .append_ts(write.start_ts)
-    .into_encoded();
-
-// After (fixed):
-let mut default_key = Vec::with_capacity(user_key.len() + 8);
-default_key.extend_from_slice(user_key);
-default_key.extend_from_slice(&(!write.start_ts.into_inner()).to_be_bytes());
+// 最终正确版本：z + memcomparable(user_key) + !start_ts
+let build_default_key = |start_ts: TimeStamp| {
+    let mut dk = Vec::with_capacity(1 + user_key.len() + 8);
+    dk.push(b'z');   // CDC observer key 无 z → 补上
+    dk.extend_from_slice(user_key);  // 已是 memcomparable，不重编码
+    dk.extend_from_slice(&(!start_ts.into_inner()).to_be_bytes());
+    dk
+};
 ```
 
 ### delegate.rs
 
-WRITE CF: 直接用 `write_key`/`raw_key`，不追加 `z`。
-DEFAULT CF (fallback): 直接用 `data_key`，不追加 `z`。
+- WRITE CF happy path & fallback: **保留** `wk.push(b'z')`（正确）
+- DEFAULT CF fallback: **保留** `dk.push(b'z')`（正确）
 
 ### TiDB main.go
 
-`createReadOnlyDomain` 改为创建 bare domain + lazy session factory，避免 BootstrapSession 的 schema load 触发 DefaultNotFound 导致 nil domain → `createServer` panic。
+`createReadOnlyDomain`：创建 bare domain + `StartSchemaLoad()`（5s periodic reload），DDL 变更通过周期 schema reload 在线可见。
+
+---
+
+## 迭代记录
+
+| 迭代 | 理解 | 改动 | 结果 |
+|------|------|------|------|
+| 1 | CDC key **有** z → 去掉 delegate 的 z | 删 `wk.push(b'z')`, `dk.push(b'z')` | ❌ target 上 key 缺 z |
+| 2 | CDC key **有** z → 只修 DEFAULT CF | WRITE CF 去掉 z，DEFAULT CF 去掉 z | ❌ 同上 |
+| 3 | CDC key **无** z → 补 z，只修 from_raw | WRITE CF 保留 z，DEFAULT CF 改为 `z + user_key + !start_ts` | ✅ 全部通过 |
 
 ---
 
 ## Validation
 
-- Target TiDB (PCR_READ_ONLY=1) 启动成功，无 crash
-- `SELECT * FROM test_pcr.t1` 返回 3 rows
-- PCR full scan 66 regions, Standby ready
-- 集群使用 `develop/pcr-configs/pcr-{src,tgt}-tikv.toml` 和 `tikv85/target/debug/tikv-server`
+- DML full scan + TiDB 启动 ✅
+- Live CDC INSERT/UPDATE/DELETE 即时可见 ✅
+- Live CDC 后 TiDB 重启无 crash ✅
+- CREATE TABLE 在线可见（diff load）✅
 
 ---
 
-## Tradeoffs
+## Remaining Issue
 
-- `Key::from_raw` 提供 API v1/v2 可移植性 — 但我们固定用 API v1，此抽象在此场景多余
-- Bare domain 不加载 schema → TiDB 启动后 schema cache 为空，需要后续 schema reload 补齐（已有 5s reload 机制）
-- lazy factory 的 CreateSession 可能失败 → 查询报错而非 panic（更好的行为）
+FullLoad 在 mDB key 上持续 DefaultNotFound——span_bridge.rs 的 no_short_value fallback 写入的 DEFAULT CF 值不正确。不影响 DML 和 CREATE TABLE（diff load 替代 FullLoad），但 ALTER TABLE 等需要 FullLoad 的 DDL 在线不可见。
