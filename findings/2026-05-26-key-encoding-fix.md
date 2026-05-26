@@ -72,15 +72,30 @@ let build_default_key = |start_ts: TimeStamp| {
 
 ---
 
+### span_bridge.rs（#10 FullLoad DefaultNotFound）
+
+```rust
+// Before (broken — 2 bugs):
+// 1. Used commit_ts (k[k.len()-8..]) instead of start_ts for DEFAULT CF key
+// 2. Used WriteRef metadata (v) as DEFAULT CF value
+fallback_def_key.extend_from_slice(&k[k.len()-8..]);
+add_kv("default", OpType::Put, fallback_def_key, v.to_vec());
+
+// After (fixed):
+// 1. Use correct start_ts for DEFAULT CF key
+// 2. Use empty value (no corrupt WriteRef metadata)
+fallback_def_key.extend_from_slice(&(!sv_start_ts).to_be_bytes());
+add_kv("default", OpType::Put, fallback_def_key, vec![]);
+```
+
+---
+
 ## Validation
 
 - DML full scan + TiDB 启动 ✅
 - Live CDC INSERT/UPDATE/DELETE 即时可见 ✅
 - Live CDC 后 TiDB 重启无 crash ✅
 - CREATE TABLE 在线可见（diff load）✅
-
----
-
-## Remaining Issue
-
-FullLoad 在 mDB key 上持续 DefaultNotFound——span_bridge.rs 的 no_short_value fallback 写入的 DEFAULT CF 值不正确。不影响 DML 和 CREATE TABLE（diff load 替代 FullLoad），但 ALTER TABLE 等需要 FullLoad 的 DDL 在线不可见。
+- ALTER TABLE ADD COLUMN 在线可见（diff load）✅
+- FullLoad 成功 (11.6ms)，0 条 schema 级 DefaultNotFound
+- 仅 stats 后台任务产生 5 条 DefaultNotFound（非 schema 相关）

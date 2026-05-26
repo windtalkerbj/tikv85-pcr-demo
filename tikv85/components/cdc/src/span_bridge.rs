@@ -493,10 +493,14 @@ impl SpanBridge {
                                         info!("PCR: get_value_cf MISS — source has no DEFAULT CF at this TS";
                                             "idx" => idx);
                                     }
+                                    // Source has no DEFAULT CF at this TS (meta keys use
+                                    // short_value on source). Fallback: write empty
+                                    // DEFAULT CF at correct start_ts so TiDB can
+                                    // find it without corrupting data.
                                     let mut fallback_def_key = Vec::with_capacity(raw_data.len() + 8);
                                     fallback_def_key.extend_from_slice(raw_data);
-                                    fallback_def_key.extend_from_slice(&k[k.len()-8..]);
-                                    add_kv("default", OpType::Put, fallback_def_key, v.to_vec());
+                                    fallback_def_key.extend_from_slice(&(!sv_start_ts).to_be_bytes());
+                                    add_kv("default", OpType::Put, fallback_def_key, vec![]);
                                 }
                             }
                         }
