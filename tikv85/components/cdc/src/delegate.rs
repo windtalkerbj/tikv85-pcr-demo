@@ -1432,29 +1432,39 @@ impl Delegate {
                     info!("PCR: WriteRef parse fallback (txn)";
                         "region_id" => self.region_id,
                         "key_prefix" => &kp, "val_prefix" => &vp);
-                    // WRITE CF: z-prefixed key + raw value
                     let mut wk = Vec::with_capacity(1 + raw_key.len());
                     wk.push(b'z');
                     wk.extend_from_slice(raw_key);
                     batcher.add_kv(wk, value.clone(), OpType::Put, "write");
-                    // DEFAULT CF: extract data_key from WRITE CF key (remove !commit_ts suffix),
-                    // parse start_ts from WriteRef value, construct z + data_key + !start_ts
-                    if raw_key.len() >= 8 {
-                        let data_key = &raw_key[..raw_key.len()-8];
-                        let start_ts = {
-                            let mut p = 1; let mut val: u64 = 0;
-                            while p < value.len() {
-                                let b = value[p]; p += 1;
-                                val = (val << 7) | ((b & 0x7F) as u64);
-                                if (b & 0x80) == 0 { break; }
-                            }
-                            !val
-                        };
-                        let mut dk = Vec::with_capacity(1 + data_key.len() + 8);
-                        dk.push(b'z');
-                        dk.extend_from_slice(data_key);
-                        dk.extend_from_slice(&start_ts.to_be_bytes());
-                        batcher.add_kv(dk, value, OpType::Put, "default");
+                    // DEFAULT CF: only generate if value is a valid WriteRef (starts with P/D/L/R).
+                    // Meta key JSON (starts with '{') is NOT a WriteRef — skip TS extraction.
+                    if raw_key.len() >= 8 && !value.is_empty() {
+                        let first_byte = value[0];
+                        let is_write_ref = first_byte == b'P' || first_byte == b'D'
+                            || first_byte == b'L' || first_byte == b'R';
+                        if is_write_ref {
+                            let data_key = &raw_key[..raw_key.len()-8];
+                            let start_ts = {
+                                let mut p = 1; let mut val: u64 = 0;
+                                while p < value.len() {
+                                    let b = value[p]; p += 1;
+                                    val = (val << 7) | ((b & 0x7F) as u64);
+                                    if (b & 0x80) == 0 { break; }
+                                }
+                                !val
+                            };
+                            let mut dk = Vec::with_capacity(1 + data_key.len() + 8);
+                            dk.push(b'z');
+                            dk.extend_from_slice(data_key);
+                            dk.extend_from_slice(&start_ts.to_be_bytes());
+                            batcher.add_kv(dk, value, OpType::Put, "default");
+                        } else {
+                            // Non-WriteRef (meta key JSON): start_ts == commit_ts.
+                            // DEFAULT CF key = same as WRITE CF key.
+                            let mut dk = Vec::with_capacity(raw_key.len());
+                            dk.extend_from_slice(raw_key);
+                            batcher.add_kv(dk, value, OpType::Put, "default");
+                        }
                     }
                 }
             }
@@ -1518,29 +1528,39 @@ impl Delegate {
                     PCR_PRODUCER_METRICS.write_ref_parse_fallbacks.inc();
                     let raw_key = put.get_key();
                     let value = put.get_value().to_vec();
-                    // WRITE CF: z-prefixed key + raw value
                     let mut wk = Vec::with_capacity(1 + raw_key.len());
                     wk.push(b'z');
                     wk.extend_from_slice(raw_key);
                     batcher.add_kv(wk, value.clone(), OpType::Put, "write");
-                    // DEFAULT CF: extract data_key from WRITE CF key (remove !commit_ts suffix),
-                    // parse start_ts from WriteRef value, construct z + data_key + !start_ts
-                    if raw_key.len() >= 8 {
-                        let data_key = &raw_key[..raw_key.len()-8];
-                        let start_ts = {
-                            let mut p = 1; let mut val: u64 = 0;
-                            while p < value.len() {
-                                let b = value[p]; p += 1;
-                                val = (val << 7) | ((b & 0x7F) as u64);
-                                if (b & 0x80) == 0 { break; }
-                            }
-                            !val
-                        };
-                        let mut dk = Vec::with_capacity(1 + data_key.len() + 8);
-                        dk.push(b'z');
-                        dk.extend_from_slice(data_key);
-                        dk.extend_from_slice(&start_ts.to_be_bytes());
-                        batcher.add_kv(dk, value, OpType::Put, "default");
+                    // DEFAULT CF: only generate if value is a valid WriteRef (starts with P/D/L/R).
+                    // Meta key JSON (starts with '{') is NOT a WriteRef — skip TS extraction.
+                    if raw_key.len() >= 8 && !value.is_empty() {
+                        let first_byte = value[0];
+                        let is_write_ref = first_byte == b'P' || first_byte == b'D'
+                            || first_byte == b'L' || first_byte == b'R';
+                        if is_write_ref {
+                            let data_key = &raw_key[..raw_key.len()-8];
+                            let start_ts = {
+                                let mut p = 1; let mut val: u64 = 0;
+                                while p < value.len() {
+                                    let b = value[p]; p += 1;
+                                    val = (val << 7) | ((b & 0x7F) as u64);
+                                    if (b & 0x80) == 0 { break; }
+                                }
+                                !val
+                            };
+                            let mut dk = Vec::with_capacity(1 + data_key.len() + 8);
+                            dk.push(b'z');
+                            dk.extend_from_slice(data_key);
+                            dk.extend_from_slice(&start_ts.to_be_bytes());
+                            batcher.add_kv(dk, value, OpType::Put, "default");
+                        } else {
+                            // Non-WriteRef (meta key JSON): start_ts == commit_ts.
+                            // DEFAULT CF key = same as WRITE CF key.
+                            let mut dk = Vec::with_capacity(raw_key.len());
+                            dk.extend_from_slice(raw_key);
+                            batcher.add_kv(dk, value, OpType::Put, "default");
+                        }
                     }
                 }
             }

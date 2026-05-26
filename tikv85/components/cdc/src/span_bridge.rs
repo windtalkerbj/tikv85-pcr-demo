@@ -441,19 +441,19 @@ impl SpanBridge {
                                     };
                                     if k.len() >= 9 {
                                         // raw_prefix = k without z-prefix and !commit_ts suffix
-                                        let raw_prefix = &k[1..k.len()-8];
-                                        let mut def_key = Vec::with_capacity(raw_prefix.len() + 8);
-                                        def_key.extend_from_slice(raw_prefix);
+                                        let raw_data = &k[..k.len()-8];
+                                        let mut def_key = Vec::with_capacity(raw_data.len() + 8);
+                                        def_key.extend_from_slice(raw_data);
                                         def_key.extend_from_slice(&sv_start_ts.to_be_bytes());
                                         add_kv("default", OpType::Put, def_key, short_val.to_vec());
                                     }
                                 }
                             }
                         } else {
-                            no_sv.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let idx = no_sv.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             // No short_value: read DEFAULT CF from source RocksDB at start_ts
                             if k.len() >= 9 {
-                                let raw_prefix = &k[1..k.len()-8]; // strip z-prefix and !commit_ts
+                                let raw_data = &k[..k.len()-8];
                                 let sv_start_ts = {
                                     let mut p = 1; let mut val: u64 = 0;
                                     while p < v.len() {
@@ -463,13 +463,40 @@ impl SpanBridge {
                                     }
                                     val
                                 };
-                                // Read DEFAULT CF from source RocksDB
-                                let mut def_key = Vec::with_capacity(raw_prefix.len() + 8);
-                                def_key.extend_from_slice(raw_prefix);
+                                let mut def_key = Vec::with_capacity(raw_data.len() + 8);
+                                        def_key.extend_from_slice(raw_data);
                                 def_key.extend_from_slice(&(!sv_start_ts).to_be_bytes());
+                                // Dump first 3 mDB entries for root cause analysis
+                                if idx < 3 {
+                                    let commit_ts_raw = &k[k.len()-8..];
+                                    info!("PCR: mDB key diagnostic";
+                                        "idx" => idx,
+                                        "region_id" => region_id,
+                                        "write_key_prefix" => ?format!("{:02x?}", &k[..std::cmp::min(k.len(), 16)]),
+                                        "write_val_prefix" => ?format!("{:02x?}", &v[..std::cmp::min(v.len(), 16)]),
+                                        "parsed_start_ts" => sv_start_ts,
+                                        "commit_ts_bytes" => ?format!("{:02x?}", commit_ts_raw),
+                                        "def_key" => ?format!("{:02x?}", &def_key[..std::cmp::min(def_key.len(), 32)]),
+                                    );
+                                }
                                 if let Ok(Some(def_val)) = engine.get_value_cf("default", &def_key) {
+                                    if idx < 3 {
+                                        info!("PCR: get_value_cf OK";
+                                            "idx" => idx, "vlen" => def_val.len(),
+                                            "val_prefix" => ?format!("{:02x?}", &def_val[..std::cmp::min(def_val.len(), 20)]),
+                                        );
+                                    }
                                     let def_bytes = def_val.to_vec();
                                     add_kv("default", OpType::Put, def_key, def_bytes);
+                                } else {
+                                    if idx < 3 {
+                                        info!("PCR: get_value_cf MISS — source has no DEFAULT CF at this TS";
+                                            "idx" => idx);
+                                    }
+                                    let mut fallback_def_key = Vec::with_capacity(raw_data.len() + 8);
+                                    fallback_def_key.extend_from_slice(raw_data);
+                                    fallback_def_key.extend_from_slice(&k[k.len()-8..]);
+                                    add_kv("default", OpType::Put, fallback_def_key, v.to_vec());
                                 }
                             }
                         }

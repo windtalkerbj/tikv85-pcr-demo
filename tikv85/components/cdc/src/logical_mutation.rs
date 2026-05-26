@@ -46,21 +46,31 @@ pub enum LogicalMutation {
 impl LogicalMutation {
     /// Parse a WRITE CF entry into a logical mutation.
     ///
-    /// `cf_key` is the raw WRITE CF key from the Raft command: it is
-    /// `memcomparable(user_key) + encoded(commit_ts)` **without** the 'z'
-    /// DATA_PREFIX (that prefix is added later by `handle_put` during apply).
+    /// `cf_key` is the raw WRITE CF key from the Raft command / CDC observer.
+    /// In API v1 this is WITHOUT the 'z' DATA_PREFIX — cf_key = memcomparable(key) + TS.
+    /// The 'z' prefix must be added when constructing target RocksDB keys.
     ///
     /// `write_bytes` is the raw WriteRef value from the Raft command.
     pub fn from_write_cf(cf_key: &[u8], write_bytes: &[u8]) -> Option<Self> {
         let write = WriteRef::parse(write_bytes).ok()?;
         let commit_ts = Key::decode_ts_from(cf_key).ok()?;
+        // user_key is memcomparable-encoded but WITHOUT 'z' DATA_PREFIX.
+        // Do NOT call Key::from_raw which would double-encode.
         let user_key = Key::truncate_ts_for(cf_key).ok()?;
+
+        // Build encoded DEFAULT CF key: 'z' + memcomparable(key) + encoded(start_ts).
+        // Matches RocksDB key format (same as span_bridge.rs full scan path).
+        let build_default_key = |start_ts: TimeStamp| {
+            let mut dk = Vec::with_capacity(1 + user_key.len() + 8);
+            dk.push(b'z');
+            dk.extend_from_slice(user_key);
+            dk.extend_from_slice(&(!start_ts.into_inner()).to_be_bytes());
+            dk
+        };
 
         match write.write_type {
             WriteType::Put => {
-                let default_key = Key::from_raw(user_key)
-                    .append_ts(write.start_ts)
-                    .into_encoded();
+                let default_key = build_default_key(write.start_ts);
                 Some(LogicalMutation::Put {
                     default_key,
                     write_key: cf_key.to_vec(),
@@ -70,9 +80,7 @@ impl LogicalMutation {
                 })
             }
             WriteType::Delete => {
-                let default_key = Key::from_raw(user_key)
-                    .append_ts(write.start_ts)
-                    .into_encoded();
+                let default_key = build_default_key(write.start_ts);
                 Some(LogicalMutation::Delete {
                     default_key,
                     write_key: cf_key.to_vec(),
@@ -81,9 +89,7 @@ impl LogicalMutation {
                 })
             }
             WriteType::Rollback => {
-                let default_key = Key::from_raw(user_key)
-                    .append_ts(write.start_ts)
-                    .into_encoded();
+                let default_key = build_default_key(write.start_ts);
                 Some(LogicalMutation::Rollback {
                     default_key,
                     write_key: cf_key.to_vec(),

@@ -50,6 +50,8 @@ Reviewer MUST:
 - avoid premature escalation
 - require evidence before reopening Research
 - identify hidden consistency risks
+- demand falsifiability: any hypothesis that explains < 100% of symptoms is REJECTED
+- block architecture-layer conclusions without byte-level forensic evidence
 
 
 Reviewer MUST NOT:
@@ -152,6 +154,19 @@ CLOSE:
   - replay verified
   - semantic consistency preserved
   - unresolved architectural risk acceptable
+  - ALL of the following CLOSE-checklist items pass:
+    1. Byte-level evidence: raw bytes compared source vs target (not inferred from behavior)
+    2. Dual-path verification: fix validated on BOTH full scan and live CDC paths
+    3. Unexplained survivors: zero corner cases left unexplained
+    4. Escalation-exhaustion: all implementation-layer diagnostics completed before accepting architecture-layer conclusions
+    5. Contradiction-free: no symptom contradicts the accepted root cause
+    → If any checklist item fails, CLOSE is blocked. RETURN TO BUILDER or REOPEN RESEARCH instead.
+
+ARCHITECTURE-LAYER CLAIMS:
+- Any claim that "source data is corrupt" or "architecture prevents fix" requires:
+  1. Byte-level forensic evidence (raw KV dump, not behavioral inference)
+  2. Negative result from all implementation-layer diagnostic paths
+  → Without BOTH, classify as implementation-layer and RETURN TO BUILDER.
 
 
 ---

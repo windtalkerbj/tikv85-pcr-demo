@@ -1,45 +1,48 @@
 # CURRENT OWNER
 
-Reviewer
+Builder
 
 ---
+
 # CURRENT PHASE
 
-Semantic Validation (final)
+Build — Regression 完成
 
 ---
-# ACHIEVED (2026-05-25)
 
-## TiKV PCR fixes
-| Fix | File | What |
-|-----|------|------|
-| Relay observability | span_bridge.rs | Arc<AtomicU64> counters survive relay restarts |
-| TSO bumper | task.rs | 1s interval, 500K batch, <2s visibility |
-| WriteRef fallback DEFAULT CF | delegate.rs | Both CFs with correct TS suffix |
-| Full scan cross-CF synthesis | span_bridge.rs | Synthesize DEFAULT CF from short_value + old_value_cb |
-| PD schema version sync | schema_sync.rs | Read source PD etcd v3 → write target PD |
+# REVIEWER RULING (2026-05-26)
 
-## TiDB fixes (offcial-tidb-8.5.6)
-| Fix | File | What |
-|-----|------|------|
-| Online FullLoad trigger | domain.go | 0 diffs → force FullLoad |
-| PCR read-only bootstrap | main.go | DefaultNotFound → createReadOnlyDomain |
-| Both TiDBs use same version | - | v8.5.6 source + target |
+- 第一次 review: key encoding fix ✅ 6/8 通过，2 ⚠️ non-blocking
+- 第二次 review: 发现 delegate WRITE CF 错误去掉 `z` 前缀，修复后全部通过
 
-## DDL Regression
-| Operation | Result | Mechanism |
-|-----------|--------|-----------|
-| Full scan startup | ✅ | cross-CF fix + read-only domain |
-| CREATE TABLE | ✅ | SpanBridge rediscovery + full scan |
-| DROP TABLE | ✅ | DeleteRange CDC |
-| TRUNCATE TABLE | ✅ | DeleteRange + scan |
-| Lightning LOCAL | ✅ | Rediscovery + full scan |
-| INSERT/UPDATE/DELETE | ✅ | Live CDC + TSO bumper |
-| ALTER TABLE online | ⚠️ | FullLoad runs but KV data incomplete |
-| CREATE INDEX online | ⚠️ | Same as above |
+---
 
-## Demo Limitations
-1. ALTER TABLE / CREATE INDEX online not visible (need TiDB full restart on fresh PCR)
-2. TiDB restart after PCR activity unreliable (meta key DefaultNotFound)
-3. Target TiDB must use PCR read-only mode
+# REGRESSION RESULTS (2026-05-26, 第三次迭代)
 
+第三次编译（正确修复：CDC observer key 无 `z` → delegate 补 `z` + logical_mutation 直接拼接不从 from_raw 重编码）：
+
+| 测试 | 结果 |
+|------|------|
+| Full scan + TiDB 启动 | ✅ 无 crash |
+| Live CDC INSERT/UPDATE/DELETE | ✅ 数据即时可见 |
+| Live CDC 后 TiDB 重启 | ✅ 无 crash，数据完整 |
+| CREATE TABLE during PCR | ✅ 重启后可见 |
+| ALTER TABLE ADD COLUMN | ✅ 重启后可见 |
+| DROP TABLE | ✅ 重启后确认已删除 |
+| TRUNCATE TABLE | ✅ 重启后可见 |
+| CREATE INDEX | ⚠️ 磁盘空间不足（非 PCR 问题）|
+
+---
+
+# FILES CHANGED (final)
+
+| 文件 | 修改 |
+|------|------|
+| `tikv85/components/cdc/src/logical_mutation.rs` | `default_key` 改为 `z + user_key + !start_ts`，不通过 `Key::from_raw` 重编码 |
+| `tikv85/components/cdc/src/delegate.rs` | WRITE CF happy path: 保留 `z` 前缀（正确）；fallback: 保留 `z` 前缀（正确） |
+| `offcial-tidb-8.5.6/cmd/tidb-server/main.go` | `createReadOnlyDomain` 创建 bare domain，不 nil panic |
+
+# KNOWN LIMITATIONS
+
+- DDL 需要重启 target TiDB 才能看到（bare domain 不做 online schema reload）
+- CREATE INDEX 因磁盘空间不足无法测试

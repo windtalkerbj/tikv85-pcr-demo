@@ -309,3 +309,20 @@ When uncertain:
 trace first,
 instrument second,
 escalate last.
+
+Builder MUST prefer:
+
+- git diff output
+- minimal patch generation
+- package-local compile
+- targeted validation
+
+Builder SHOULD avoid:
+
+- sed/awk based source rewriting
+- full repository compilation
+- repeated make server
+- repeated cargo/go workspace rebuilds
+
+Builder optimization priority:
+reduce feedback loop latency.
