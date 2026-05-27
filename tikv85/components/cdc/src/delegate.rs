@@ -1476,9 +1476,13 @@ impl Delegate {
                 }
             } else {
                 // cf="" or "default" — raw data from Prewrite (e.g. mDB JSON).
-                let key = put.get_key();
+                // Raft command key lacks z DATA_PREFIX. RocksDB API v1 requires it.
+                let raw_key = put.get_key();
                 let value = put.get_value();
-                batcher.add_kv(key.to_vec(), value.to_vec(), OpType::Put, "default");
+                let mut dk = Vec::with_capacity(1 + raw_key.len());
+                dk.push(b'z');
+                dk.extend_from_slice(raw_key);
+                batcher.add_kv(dk, value.to_vec(), OpType::Put, "default");
             }
         }
 
@@ -1579,9 +1583,13 @@ impl Delegate {
                 }
             } else {
                 // cf="" or "default" — raw data from Prewrite (e.g. mDB JSON).
-                let key = put.get_key();
+                // Raft command key lacks z DATA_PREFIX. RocksDB API v1 requires it.
+                let raw_key = put.get_key();
                 let value = put.get_value();
-                batcher.add_kv(key.to_vec(), value.to_vec(), OpType::Put, "default");
+                let mut dk = Vec::with_capacity(1 + raw_key.len());
+                dk.push(b'z');
+                dk.extend_from_slice(raw_key);
+                batcher.add_kv(dk, value.to_vec(), OpType::Put, "default");
             }
         }
 

@@ -1,49 +1,30 @@
 # CURRENT OWNER
 
-Researcher
+Builder
 
 ---
-
 # CURRENT PHASE
 
-Research — cf="" fix implemented but #11 not resolved
+Build (cf="" fix: add z prefix to DEFAULT CF key)
 
 ---
+# ROOT CAUSE (2026-05-27)
 
-# WHAT WE FOUND (2026-05-27)
+cf="" fix writes raw JSON to target DEFAULT CF but key missing `z` DATA_PREFIX.
+Raft command key lacks `z`. RocksDB API v1 requires `z` on ALL keys.
+TiDB reads with `z` → key not found → 61 errors still.
 
-## on_batch diagnostic confirmed
-meta key raw JSON (`{...}`) Commit comes through cf="" (DEFAULT CF), NOT cf="write".
-delegate PCR code explicitly skipped cf="" events (comment: "DEFAULT CF puts are NOT replicated").
+Same root as the earlier WRITE CF fallback bug — DEFAULT CF key missing `z`.
 
-## Fix implemented
-Both sink_raw_put and sink_txn_put: added `else` branch for cf="" / "default".
-Writes raw value directly to DEFAULT CF on target. Compiles clean.
+## Fix
 
-## Fix did NOT resolve #11
-61 errors on restart after ALTER INDEX + DROP INDEX.
-Raw JSON IS being written to target DEFAULT CF, but TiDB still can't read it.
-Root cause may be: DEFAULT CF key format mismatch, or value at wrong timestamp.
+sink_raw_put + sink_txn_put cf="" branch: add `z` prefix before writing DEFAULT CF key.
+```rust
+let mut dk = Vec::with_capacity(1 + raw_key.len());
+dk.push(b'z');
+dk.extend_from_slice(raw_key);
+batcher.add_kv(dk, value, OpType::Put, "default");
+```
 
----
-
-# RULED OUT
-1. ❌ old_value_cb fallback — never triggered
-2. ❌ lock_tracker stuck — region 2 at All
-3. ❌ LockRelated filtering — capture_change acknowledged
-4. ❌ cf="" skip — fix implemented, doesn't help
-
----
-
-# DDL REGRESSION
-5/6 pass. Only ALTER INDEX INVISIBLE + DROP INDEX fails (#11).
-
----
-
-# COMPLETED FIXES
-- #10 FullLoad mDB DefaultNotFound ✅
-- Live CDC key encoding ✅
-- TiDB createReadOnlyDomain ✅
-- old_value_cb fallback ✅
-- lock_tracker Prepared ✅
-- cf="" handling in delegate ✅ (correct but insufficient)
+## Ruled out (all 6)
+old_value_cb | lock_tracker | LockRelated | IngestSst | CF routing | cf="" skip
