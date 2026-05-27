@@ -573,15 +573,14 @@ impl Delegate {
             );
         }
         self.pcr_event_sink = Some(event_sink);
-        // Transition lock tracker from Pending to Prepared to avoid
-        // `unreachable!()` in push_lock. PCR doesn't need lock tracking
-        // but the sink_txn_put code path touches it.
-        if matches!(self.lock_tracker, LockTracker::Pending) {
-            self.lock_tracker = LockTracker::Prepared {
-                region: kvproto::metapb::Region::default(),
-                locks: std::collections::BTreeMap::new(),
-            };
-        }
+        // Force lock_tracker to Prepared, bypassing lock resolution.
+        // PCR copies committed MVCC — it doesn't need lock tracking.
+        // Without this, stuck LockRelated regions never reach All
+        // and their CDC batches are filtered by the observer.
+        self.lock_tracker = LockTracker::Prepared {
+            region: kvproto::metapb::Region::default(),
+            locks: std::collections::BTreeMap::new(),
+        };
     }
 
     /// Send a PCR event via the event sink if PCR is enabled.
