@@ -1414,7 +1414,9 @@ impl Delegate {
                                 PCR_PRODUCER_METRICS.short_value_missing_count.inc();
                                 let dk = Key::from_encoded(default_key.clone());
                                 if let Ok(Some(val)) = old_value_cb(dk, start_ts, old_value_cache, statistics) {
-                                    batcher.add_kv(default_key, val, OpType::Put, "default");
+                                    if !self.pcr_cf_default_keys.contains(&default_key) {
+                                        batcher.add_kv(default_key, val, OpType::Put, "default");
+                                    }
                                 } else {
                                     PCR_PRODUCER_METRICS.old_value_cb_failures.inc();
                                     // Fallback: write empty DEFAULT CF with correct key.
@@ -1541,7 +1543,9 @@ impl Delegate {
                                 PCR_PRODUCER_METRICS.short_value_missing_count.inc();
                                 let dk = Key::from_encoded(default_key.clone());
                                 if let Ok(Some(val)) = old_value_cb(dk, start_ts, old_value_cache, statistics) {
-                                    batcher.add_kv(default_key, val, OpType::Put, "default");
+                                    if !self.pcr_cf_default_keys.contains(&default_key) {
+                                        batcher.add_kv(default_key, val, OpType::Put, "default");
+                                    }
                                 } else {
                                     PCR_PRODUCER_METRICS.old_value_cb_failures.inc();
                                     batcher.add_kv(default_key, vec![], OpType::Put, "default");
