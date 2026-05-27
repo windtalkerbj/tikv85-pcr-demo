@@ -1403,10 +1403,10 @@ impl Delegate {
                                     batcher.add_kv(default_key, val, OpType::Put, "default");
                                 } else {
                                     PCR_PRODUCER_METRICS.old_value_cb_failures.inc();
-                                    info!("PCR: old_value_cb failed";
-                                        "region_id" => self.region_id,
-                                        "start_ts" => start_ts.into_inner(),
-                                    );
+                                    // Fallback: write empty DEFAULT CF with correct key.
+                                    // TiDB uses short_value from WRITE CF for most reads;
+                                    // this empty entry prevents DefaultNotFound on restart.
+                                    batcher.add_kv(default_key, vec![], OpType::Put, "default");
                                 }
                             }
                             let mut wk = Vec::with_capacity(1 + write_key.len());
@@ -1504,10 +1504,7 @@ impl Delegate {
                                     batcher.add_kv(default_key, val, OpType::Put, "default");
                                 } else {
                                     PCR_PRODUCER_METRICS.old_value_cb_failures.inc();
-                                    info!("PCR: old_value_cb failed (txn)";
-                                        "region_id" => self.region_id,
-                                        "start_ts" => start_ts.into_inner(),
-                                    );
+                                    batcher.add_kv(default_key, vec![], OpType::Put, "default");
                                 }
                             }
                             let mut wk = Vec::with_capacity(1 + write_key.len());
