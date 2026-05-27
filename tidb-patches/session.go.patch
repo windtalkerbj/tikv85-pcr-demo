@@ -1,0 +1,19 @@
+--- a/pkg/session/session.go
++++ b/pkg/session/session.go
+@@ -32,6 +32,7 @@ import (
+ 	"runtime/pprof"
+ 	"strconv"
+ 	"strings"
++	"os"
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
+@@ -3455,7 +3456,7 @@ func BootstrapSession(store kv.Storage) (*domain.Domain, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if ver < currentBootstrapVersion {
++	if ver < currentBootstrapVersion && os.Getenv("PCR_READ_ONLY") != "1" {
+ 		runInBootstrapSession(store, ver)
+ 	} else {
+ 		err = InitMDLVariable(store)

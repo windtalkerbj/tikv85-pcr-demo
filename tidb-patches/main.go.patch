@@ -1,0 +1,73 @@
+--- cmd/tidb-server/main.go	2026-05-26 22:29:17
++++ /Users/cjn/Documents/OpenSource/dig_tidb/offcial-tidb-8.5.6/cmd/tidb-server/main.go	2026-05-26 23:41:44
+@@ -34,6 +34,7 @@
+ 	"github.com/pingcap/tidb/pkg/config"
+ 	"github.com/pingcap/tidb/pkg/ddl"
+ 	"github.com/pingcap/tidb/pkg/domain"
++	"github.com/ngaut/pools"
+ 	"github.com/pingcap/tidb/pkg/executor"
+ 	"github.com/pingcap/tidb/pkg/executor/mppcoordmanager"
+ 	"github.com/pingcap/tidb/pkg/extension"
+@@ -395,6 +396,23 @@
+ 	terror.MustNil(err)
+ 	err = kvstore.Register("unistore", mockstore.EmbedUnistoreDriver{})
+ 	terror.MustNil(err)
++}
++
++// createReadOnlyDomain builds a Domain for PCR read-only mode with periodic
++// schema reload (5s ticker). Uses a lazy session factory — individual sessions
++// may hit DefaultNotFound on mDB reads but that won't crash the server.
++func createReadOnlyDomain(storage kv.Storage) *domain.Domain {
++	factory := func() (pools.Resource, error) {
++		ses, err := session.CreateSession(storage)
++		if err != nil {
++			log.Warn("PCR: lazy session creation failed", zap.Error(err))
++			return nil, err
++		}
++		return ses, nil
++	}
++	dom := domain.NewDomain(storage, 45*time.Second, 3*time.Second, 0, factory)
++	log.Info("PCR: bare read-only domain created (no schema load, lazy sessions)")
++	return dom
+ }
+ 
+ func createStoreDDLOwnerMgrAndDomain(keyspaceName string) (kv.Storage, *domain.Domain) {
+@@ -410,11 +428,34 @@
+ 	terror.MustNil(err)
+ 	copr.GlobalMPPFailedStoreProber.Run()
+ 	mppcoordmanager.InstanceMPPCoordinatorManager.Run()
+-	// Bootstrap a session to load information schema.
+-	err = ddl.StartOwnerManager(context.Background(), storage)
+-	terror.MustNil(err)
++	// PCR mode: disable DDL to avoid 2PC writes on target cluster.
++	if os.Getenv("PCR_READ_ONLY") == "1" {
++		cfg.Instance.TiDBEnableDDL.Store(false)
++		log.Warn("PCR: PCR_READ_ONLY=1, DDL disabled")
++	}
++	err = ddl.StartOwnerManager(context.Background(), storage)
++	if err != nil {
++		errStr := err.Error()
++		if strings.Contains(errStr, "PCR replication mode") ||
++			strings.Contains(errStr, "writes not allowed") ||
++			strings.Contains(errStr, "DefaultNotFound") {
++			log.Warn("PCR: DDL owner skipped", zap.Error(err))
++		} else {
++			terror.MustNil(err)
++		}
++	}
+ 	dom, err := session.BootstrapSession(storage)
+-	terror.MustNil(err)
++	if err != nil {
++		errStr := err.Error()
++		if strings.Contains(errStr, "PCR replication mode") ||
++			strings.Contains(errStr, "writes not allowed") ||
++			strings.Contains(errStr, "DefaultNotFound") {
++			log.Warn("PCR: bootstrap failed, running read-only", zap.Error(err))
++			dom = createReadOnlyDomain(storage)
++		} else {
++			terror.MustNil(err)
++		}
++	}
+ 	return storage, dom
+ }
+ 
