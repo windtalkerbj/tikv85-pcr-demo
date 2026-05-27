@@ -157,6 +157,26 @@ STOP and escalate to:
 
 
 ---
+# BUILD DISCIPLINE
+
+Builder MUST follow the minimal feedback loop:
+
+1. Edit .rs files → immediately `cargo check -p <crate>`
+2. check passes → `cargo build --bin tikv-server`
+3. build passes → restart cluster via `/tmp/pcr-restart.sh`
+4. cluster ready → smoke test (INSERT 1 row, verify convergence)
+5. smoke passes → full regression or handoff to Reviewer
+
+DO NOT batch multiple edits without checking between them.
+DO NOT restart cluster before build passes.
+DO NOT skip smoke test before reporting success.
+DO NOT edit CLAUDE.md, agents/*.md, or workflow_state.md without explicit Reviewer approval in the current conversation.
+
+Rule priority: cargo check > cargo build > cluster restart > smoke > regression.
+A broken check means STOP all further steps.
+
+
+---
 
 # VALIDATION RULES
 
