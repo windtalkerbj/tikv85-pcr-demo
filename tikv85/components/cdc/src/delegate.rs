@@ -1396,10 +1396,10 @@ impl Delegate {
                 if let Some(mutation) = result {
                     match mutation {
                         LogicalMutation::Put { default_key, write_key, start_ts, ref short_value, .. } => {
+                            let seen = self.pcr_cf_default_keys.contains(&default_key);
                             if let Some(ref val) = short_value {
-                                // cf="" full JSON takes priority over short_value version counter.
-                                if !self.pcr_cf_default_keys.contains(&default_key) {
-                                    batcher.add_kv(default_key, val.clone(), OpType::Put, "default");
+                                if !seen {
+                                    batcher.add_kv(default_key.clone(), val.clone(), OpType::Put, "default");
                                 }
                                 // diagnostic: confirm large JSON values (>200B) flow through short_value path
                                 if val.len() > 200 {
@@ -1414,7 +1414,7 @@ impl Delegate {
                                 PCR_PRODUCER_METRICS.short_value_missing_count.inc();
                                 let dk = Key::from_encoded(default_key.clone());
                                 if let Ok(Some(val)) = old_value_cb(dk, start_ts, old_value_cache, statistics) {
-                                    if !self.pcr_cf_default_keys.contains(&default_key) {
+                                    if !seen {
                                         batcher.add_kv(default_key, val, OpType::Put, "default");
                                     }
                                 } else {
@@ -1428,7 +1428,16 @@ impl Delegate {
                             let mut wk = Vec::with_capacity(1 + write_key.len());
                             wk.push(b'z');
                             wk.extend_from_slice(&write_key);
-                            batcher.add_kv(wk, put.get_value().to_vec(), OpType::Put, "write");
+                            // Strip short_value if cf="" already wrote full JSON → TiDB reads DEFAULT CF
+                            let wv = if seen {
+                                WriteRef::parse(put.get_value()).ok()
+                                    .map(|r| r.to_owned())
+                                    .map(|mut w| { w.short_value = None; w.as_ref().to_bytes() })
+                                    .unwrap_or_else(|| put.get_value().to_vec())
+                            } else {
+                                put.get_value().to_vec()
+                            };
+                            batcher.add_kv(wk, wv, OpType::Put, "write");
                         }
                         LogicalMutation::Delete { default_key, write_key, .. } => {
                             batcher.add_kv(default_key, vec![], OpType::Delete, "default");
@@ -1526,10 +1535,10 @@ impl Delegate {
                 if let Some(mutation) = result {
                     match mutation {
                         LogicalMutation::Put { default_key, write_key, start_ts, ref short_value, .. } => {
+                            let seen = self.pcr_cf_default_keys.contains(&default_key);
                             if let Some(ref val) = short_value {
-                                // cf="" full JSON takes priority over short_value version counter.
-                                if !self.pcr_cf_default_keys.contains(&default_key) {
-                                    batcher.add_kv(default_key, val.clone(), OpType::Put, "default");
+                                if !seen {
+                                    batcher.add_kv(default_key.clone(), val.clone(), OpType::Put, "default");
                                 }
                                 // diagnostic: confirm large JSON values (>200B) flow through short_value path
                                 if val.len() > 200 {
@@ -1543,7 +1552,7 @@ impl Delegate {
                                 PCR_PRODUCER_METRICS.short_value_missing_count.inc();
                                 let dk = Key::from_encoded(default_key.clone());
                                 if let Ok(Some(val)) = old_value_cb(dk, start_ts, old_value_cache, statistics) {
-                                    if !self.pcr_cf_default_keys.contains(&default_key) {
+                                    if !seen {
                                         batcher.add_kv(default_key, val, OpType::Put, "default");
                                     }
                                 } else {
@@ -1554,7 +1563,16 @@ impl Delegate {
                             let mut wk = Vec::with_capacity(1 + write_key.len());
                             wk.push(b'z');
                             wk.extend_from_slice(&write_key);
-                            batcher.add_kv(wk, put.get_value().to_vec(), OpType::Put, "write");
+                            // Strip short_value if cf="" already wrote full JSON → TiDB reads DEFAULT CF
+                            let wv = if seen {
+                                WriteRef::parse(put.get_value()).ok()
+                                    .map(|r| r.to_owned())
+                                    .map(|mut w| { w.short_value = None; w.as_ref().to_bytes() })
+                                    .unwrap_or_else(|| put.get_value().to_vec())
+                            } else {
+                                put.get_value().to_vec()
+                            };
+                            batcher.add_kv(wk, wv, OpType::Put, "write");
                         }
                         LogicalMutation::Delete { default_key, write_key, .. } => {
                             batcher.add_kv(default_key, vec![], OpType::Delete, "default");
