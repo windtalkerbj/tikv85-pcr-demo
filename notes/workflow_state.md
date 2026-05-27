@@ -6,35 +6,46 @@ Researcher
 
 # CURRENT PHASE
 
-Research — #11 根因需要重新假设
+Research — #11 需要新假设
 
 ---
 
-# BUILDER HANDOFF (2026-05-27)
+# DIAGNOSTIC FINDINGS (2026-05-27)
 
-Builder 层面的排查和修复尝试已完成，但 #11 仍未解决。需要 Researcher 重新分析。
+添加了 `large short_value commit` 诊断（delegate.rs, val_len > 200B 时触发）：
 
-## 已排除的假设
+- 总计 2 次触发：`val_len=239B`，`region_id=12`，key_prefix `[74,80...]`
+- 均为 DDL history entry，**不是 TableInfo JSON**
+- TableInfo JSON（500-800B）的 Commit **从未进入 PCR batcher**
+- 3 个 counter 全零佐证
 
-1. **Prewrite 未捕获** — raftstore apply.rs:1839 拒绝 Prewrite（原版 TiKV 行为），delegate 的 CmdType::Prewrite 分支是 dead code。但 DML + CREATE TABLE/INDEX 都正常，说明 Commit 路径的 short_value 合成 DEFAULT CF 对大多数 key 是够的。
+### 结论
+Reviewer 原假设（short_value=None → old_value_cb 未调用）**不准确**。
+真实问题：TableInfo JSON Commit 事件**根本没有到达 delegate 的 PCR 代码路径**。
+不是 short_value 处理问题——是 delegate PCR 覆盖或 observer 过滤问题。
 
-2. **old_value_cb 失败** — PCR metrics 显示 `short_value_missing_count=0`、`old_value_cb_failures=0`、`write_ref_parse_fallbacks=0`。所有 mDB key 都有 short_value，old_value_cb fallback 从未触发。添加的 fallback 代码不生效。
+### 待验证
+1. TableInfo key 所在 region 的 delegate 在 Commit 时未 PCR 启用
+2. CDC observer ObserveLevel 过滤了该 Commit
+3. 该 Commit 使用非 CmdType::Put 类型
 
-3. **tidb.go error catch** — 添加 "index out of range" catch 后仍然 32 errors。BootstrapSession 的 Init 在读取 mDB 数据时崩溃，不是 DefaultNotFound。
+---
 
-## Builder 已实施但无效的修复
+# DDL REGRESSION
 
-- delegate.rs: old_value_cb 失败时写空 DEFAULT CF（未触发）
-- tidb.go: catch "index out of range" + DefaultNotFound（仍 32 errors）
-- span_bridge.rs: #10 full scan mDB fallback（有效）
+| DDL | 重启后 | 
+|-----|--------|
+| CREATE TABLE | ✅ |
+| ALTER TABLE ADD COLUMN | ✅ |
+| DROP TABLE | ✅ |  
+| TRUNCATE TABLE | ✅ |
+| CREATE INDEX | ✅ |
+| ALTER INDEX INVISIBLE + DROP INDEX | ❌ #11 |
 
-## 未解释的现象
+---
 
-- CREATE INDEX alone → restart OK
-- ALTER INDEX INVISIBLE + DROP INDEX → restart crash
-- 两者走相同的 delegate 代码路径，但结果不同
-- 重启时 BootstrapSession 读 mDB 数据 crash，不是 DefaultNotFound
+# COMPLETED FIXES
 
-## Researcher 任务
-
-提出新假设，解释为什么 ALTER INDEX/DROP INDEX 产生不可读的 mDB 数据，而 CREATE INDEX 正常。
+- #10 FullLoad mDB DefaultNotFound ✅
+- Live CDC key encoding ✅
+- TiDB createReadOnlyDomain ✅

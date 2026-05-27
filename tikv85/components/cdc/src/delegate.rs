@@ -1395,6 +1395,14 @@ impl Delegate {
                         LogicalMutation::Put { default_key, write_key, start_ts, ref short_value, .. } => {
                             if let Some(ref val) = short_value {
                                 batcher.add_kv(default_key, val.clone(), OpType::Put, "default");
+                                // diagnostic: confirm large JSON values (>200B) flow through short_value path
+                                if val.len() > 200 {
+                                    info!("PCR: large short_value commit (txn)";
+                                        "region_id" => self.region_id,
+                                        "val_len" => val.len(),
+                                        "key_prefix" => ?format!("{:02x?}", &write_key[..std::cmp::min(write_key.len(), 20)]),
+                                    );
+                                }
                             } else {
                                 // Large value: read DEFAULT CF at start_ts.
                                 PCR_PRODUCER_METRICS.short_value_missing_count.inc();
@@ -1497,6 +1505,14 @@ impl Delegate {
                         LogicalMutation::Put { default_key, write_key, start_ts, ref short_value, .. } => {
                             if let Some(ref val) = short_value {
                                 batcher.add_kv(default_key, val.clone(), OpType::Put, "default");
+                                // diagnostic: confirm large JSON values (>200B) flow through short_value path
+                                if val.len() > 200 {
+                                    info!("PCR: large short_value commit (txn)";
+                                        "region_id" => self.region_id,
+                                        "val_len" => val.len(),
+                                        "key_prefix" => ?format!("{:02x?}", &write_key[..std::cmp::min(write_key.len(), 20)]),
+                                    );
+                                }
                             } else {
                                 PCR_PRODUCER_METRICS.short_value_missing_count.inc();
                                 let dk = Key::from_encoded(default_key.clone());
