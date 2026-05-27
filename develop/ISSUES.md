@@ -2,6 +2,20 @@
 
 ## 开放
 
+### #11. Live CDC meta key DEFAULT CF 缺失（ALTER INDEX/DROP INDEX during PCR 后重启 crash）
+
+**状态**: 开放，根因已定位
+**现象**: ALTER INDEX INVISIBLE + DROP INDEX during PCR → TiDB 重启 BootstrapSession DefaultNotFound → crash
+**根因**: raftstore apply 层拒绝 Prewrite 命令（原版 TiKV 行为，非 PCR 引入）。Commit（CmdType::Put）是唯一入口。delegate 从 WriteRef.short_value 合成 DEFAULT CF——大部分 key 有 short_value → 正常。ALTER INDEX/DROP INDEX 的 mDB key 可能走 old_value_cb 路径失败 → DEFAULT CF 缺失。
+**修复方向**: 
+- 方案 A：确保 old_value_cb 对 mDB key 也能正确回读 DEFAULT CF
+- 方案 B：在 apply 层放行 Prewrite（侵入性大，影响 raftstore 核心）
+**与 #10 的区别**: #10 是 full scan 阶段复制的存量 mDB key（已修），#11 是 PCR 运行期间 live CDC 新增的 mDB key
+
+---
+
+## 已解决
+
 ### #10. FullLoad 在 mDB key 上 DefaultNotFound ✅ 已解决
 
 **修复**: span_bridge.rs no_short_value fallback 两行改动：

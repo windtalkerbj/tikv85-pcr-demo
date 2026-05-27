@@ -6,36 +6,29 @@ Builder
 
 # CURRENT PHASE
 
-Build 完成 — #10 FullLoad DefaultNotFound 已修
+Build — #11 根因已定位，待修
 
 ---
 
-# COMPLETED TODAY (2026-05-26)
+# #11 根因确认（2026-05-27）
 
-## 1. Key encoding fix for live CDC (commit `b70042a`)
+**Prewrite 被 raftstore apply 层拒绝，CDC observer 永远收不到 Prewrite 命令。**
 
-- `logical_mutation.rs`: `default_key` = `z + user_key + !start_ts`
-- `delegate.rs`: 保留 WRITE CF `z` 前缀（CDC observer key 无 `z`）
+```rust
+// raftstore/src/store/fsm/apply.rs:1839 — 原版 TiKV 行为，非 PCR 引入
+CmdType::Prewrite | CmdType::Invalid | CmdType::ReadIndex => {
+    Err(box_err!("invalid cmd type, message maybe corrupted"))
+}
+```
 
-## 2. span_bridge.rs FullLoad DefaultNotFound fix (待 commit)
+**影响链路**：Prewrite 写 DEFAULT CF → Commit 写 WRITE CF。Commit 生成 CmdType::Put，delegate 从 WriteRef 的 short_value 合成 DEFAULT CF。大部分 key（含 mDB key）有 short_value → DML + CREATE TABLE/INDEX 正常。ALTER INDEX/DROP INDEX 产生的 mDB key 可能无 short_value → old_value_cb 在 source 读不到 → DEFAULT CF 缺失 → 重启 DefaultNotFound。
 
-- 2 行改动：DEFAULT CF key 用 start_ts 替 commit_ts，value 用空值替 WriteRef metadata
-- FullLoad 成功 (11.6ms)，0 条 schema DefaultNotFound
+**修复方向**：delegate 的 Commit 路径（LogicalMutation::from_write_cf → old_value_cb fallback or short_value）已全覆盖。需确保所有 mDB WriteRef 格式都被正确处理。
 
-## 3. TiDB createReadOnlyDomain + StartSchemaLoad
+---
 
-- `main.go`: bare domain + 5s periodic schema reload
-- CREATE TABLE / ALTER TABLE 在线可见
+# COMPLETED
 
-## 4. 全部验证通过
-
-| 测试 | 结果 |
-|------|------|
-| Full scan + TiDB 启动 | ✅ |
-| Live CDC DML | ✅ 即时可见 |
-| Live CDC 后 TiDB 重启 | ✅ |
-| CREATE TABLE 在线 | ✅ |
-| ALTER TABLE ADD COLUMN 在线 | ✅ |
-| DROP TABLE | ✅ |
-| TRUNCATE | ✅ |
-| FullLoad DefaultNotFound | ✅ 0 条 |
+- #10 FullLoad mDB DefaultNotFound ✅
+- Live CDC key encoding fix ✅ 
+- DDL 回归 5/6 通过 ✅
