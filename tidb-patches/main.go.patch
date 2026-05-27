@@ -1,5 +1,5 @@
 --- cmd/tidb-server/main.go	2026-05-26 22:29:17
-+++ /Users/cjn/Documents/OpenSource/dig_tidb/offcial-tidb-8.5.6/cmd/tidb-server/main.go	2026-05-26 23:41:44
++++ /Users/cjn/Documents/OpenSource/dig_tidb/offcial-tidb-8.5.6/cmd/tidb-server/main.go	2026-05-27 18:51:15
 @@ -34,6 +34,7 @@
  	"github.com/pingcap/tidb/pkg/config"
  	"github.com/pingcap/tidb/pkg/ddl"
@@ -8,12 +8,10 @@
  	"github.com/pingcap/tidb/pkg/executor"
  	"github.com/pingcap/tidb/pkg/executor/mppcoordmanager"
  	"github.com/pingcap/tidb/pkg/extension"
-@@ -395,6 +396,23 @@
+@@ -397,6 +398,23 @@
  	terror.MustNil(err)
- 	err = kvstore.Register("unistore", mockstore.EmbedUnistoreDriver{})
- 	terror.MustNil(err)
-+}
-+
+ }
+ 
 +// createReadOnlyDomain builds a Domain for PCR read-only mode with periodic
 +// schema reload (5s ticker). Uses a lazy session factory — individual sessions
 +// may hit DefaultNotFound on mDB reads but that won't crash the server.
@@ -29,22 +27,23 @@
 +	dom := domain.NewDomain(storage, 45*time.Second, 3*time.Second, 0, factory)
 +	log.Info("PCR: bare read-only domain created (no schema load, lazy sessions)")
 +	return dom
- }
- 
++}
++
  func createStoreDDLOwnerMgrAndDomain(keyspaceName string) (kv.Storage, *domain.Domain) {
+ 	cfg := config.GetGlobalConfig()
+ 	var fullPath string
 @@ -410,11 +428,34 @@
  	terror.MustNil(err)
  	copr.GlobalMPPFailedStoreProber.Run()
  	mppcoordmanager.InstanceMPPCoordinatorManager.Run()
 -	// Bootstrap a session to load information schema.
--	err = ddl.StartOwnerManager(context.Background(), storage)
--	terror.MustNil(err)
 +	// PCR mode: disable DDL to avoid 2PC writes on target cluster.
 +	if os.Getenv("PCR_READ_ONLY") == "1" {
 +		cfg.Instance.TiDBEnableDDL.Store(false)
 +		log.Warn("PCR: PCR_READ_ONLY=1, DDL disabled")
 +	}
-+	err = ddl.StartOwnerManager(context.Background(), storage)
+ 	err = ddl.StartOwnerManager(context.Background(), storage)
+-	terror.MustNil(err)
 +	if err != nil {
 +		errStr := err.Error()
 +		if strings.Contains(errStr, "PCR replication mode") ||
@@ -69,5 +68,16 @@
 +		}
 +	}
  	return storage, dom
+ }
+ 
+@@ -868,7 +909,9 @@
+ 	go dom.ExpensiveQueryHandle().SetSessionManager(svr).Run()
+ 	go dom.MemoryUsageAlarmHandle().SetSessionManager(svr).Run()
+ 	go dom.ServerMemoryLimitHandle().SetSessionManager(svr).Run()
+-	dom.InfoSyncer().SetSessionManager(svr)
++	if is := dom.InfoSyncer(); is != nil {
++		is.SetSessionManager(svr)
++	}
+ 	return svr
  }
  
