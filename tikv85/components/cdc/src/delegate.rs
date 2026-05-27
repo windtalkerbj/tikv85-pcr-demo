@@ -348,6 +348,8 @@ pub struct Delegate {
     /// PCR event sink — connected to the gRPC PcrService Subscribe handler.
     /// When set, serialized PCR events are forwarded to the Consumer.
     pcr_event_sink: Option<futures::channel::mpsc::UnboundedSender<Vec<u8>>>,
+    /// Tracks DEFAULT CF keys written by cf="" handler — cf="write" must not overwrite.
+    pcr_cf_default_keys: collections::HashSet<Vec<u8>>,
 
     created: Instant,
     last_lag_warn: Instant,
@@ -537,6 +539,7 @@ impl Delegate {
             sst_importer: None,
             pcr_batcher: None,
             pcr_event_sink: None,
+            pcr_cf_default_keys: collections::HashSet::default(),
 
             created: Instant::now_coarse(),
             last_lag_warn: Instant::now_coarse(),
@@ -906,6 +909,7 @@ impl Delegate {
                 self.emit_pcr_event(data);
             }
         }
+        self.pcr_cf_default_keys.clear();
         Ok(())
     }
 
@@ -1393,7 +1397,10 @@ impl Delegate {
                     match mutation {
                         LogicalMutation::Put { default_key, write_key, start_ts, ref short_value, .. } => {
                             if let Some(ref val) = short_value {
-                                batcher.add_kv(default_key, val.clone(), OpType::Put, "default");
+                                // cf="" full JSON takes priority over short_value version counter.
+                                if !self.pcr_cf_default_keys.contains(&default_key) {
+                                    batcher.add_kv(default_key, val.clone(), OpType::Put, "default");
+                                }
                                 // diagnostic: confirm large JSON values (>200B) flow through short_value path
                                 if val.len() > 200 {
                                     info!("PCR: large short_value commit (txn)";
@@ -1479,9 +1486,18 @@ impl Delegate {
                 // Raft command key lacks z DATA_PREFIX. RocksDB API v1 requires it.
                 let raw_key = put.get_key();
                 let value = put.get_value();
+                let rk = format!("{:02x?}", &raw_key[..std::cmp::min(raw_key.len(), 16)]);
+                info!("PCR: cf=\"\" DEFAULT CF replay";
+                    "region_id" => self.region_id,
+                    "raw_key_prefix" => &rk,
+                    "raw_key_len" => raw_key.len(),
+                    "val_len" => value.len(),
+                    "val_prefix" => &format!("{:02x?}", &value[..std::cmp::min(value.len(), 8)]),
+                );
                 let mut dk = Vec::with_capacity(1 + raw_key.len());
                 dk.push(b'z');
                 dk.extend_from_slice(raw_key);
+                self.pcr_cf_default_keys.insert(dk.clone());
                 batcher.add_kv(dk, value.to_vec(), OpType::Put, "default");
             }
         }
@@ -1509,7 +1525,10 @@ impl Delegate {
                     match mutation {
                         LogicalMutation::Put { default_key, write_key, start_ts, ref short_value, .. } => {
                             if let Some(ref val) = short_value {
-                                batcher.add_kv(default_key, val.clone(), OpType::Put, "default");
+                                // cf="" full JSON takes priority over short_value version counter.
+                                if !self.pcr_cf_default_keys.contains(&default_key) {
+                                    batcher.add_kv(default_key, val.clone(), OpType::Put, "default");
+                                }
                                 // diagnostic: confirm large JSON values (>200B) flow through short_value path
                                 if val.len() > 200 {
                                     info!("PCR: large short_value commit (txn)";
@@ -1586,6 +1605,14 @@ impl Delegate {
                 // Raft command key lacks z DATA_PREFIX. RocksDB API v1 requires it.
                 let raw_key = put.get_key();
                 let value = put.get_value();
+                let rk = format!("{:02x?}", &raw_key[..std::cmp::min(raw_key.len(), 16)]);
+                info!("PCR: cf=\"\" DEFAULT CF replay";
+                    "region_id" => self.region_id,
+                    "raw_key_prefix" => &rk,
+                    "raw_key_len" => raw_key.len(),
+                    "val_len" => value.len(),
+                    "val_prefix" => &format!("{:02x?}", &value[..std::cmp::min(value.len(), 8)]),
+                );
                 let mut dk = Vec::with_capacity(1 + raw_key.len());
                 dk.push(b'z');
                 dk.extend_from_slice(raw_key);
