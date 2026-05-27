@@ -1474,10 +1474,12 @@ impl Delegate {
                         }
                     }
                 }
+            } else {
+                // cf="" or "default" — raw data from Prewrite (e.g. mDB JSON).
+                let key = put.get_key();
+                let value = put.get_value();
+                batcher.add_kv(key.to_vec(), value.to_vec(), OpType::Put, "default");
             }
-            // DEFAULT CF puts (cf="" or "default") are NOT replicated.
-            // Only WRITE CF commit drives replication — this prevents
-            // uncommitted data from leaking through PCR.
         }
 
         let mut row = EventRow::default();
@@ -1575,9 +1577,12 @@ impl Delegate {
                         }
                     }
                 }
+            } else {
+                // cf="" or "default" — raw data from Prewrite (e.g. mDB JSON).
+                let key = put.get_key();
+                let value = put.get_value();
+                batcher.add_kv(key.to_vec(), value.to_vec(), OpType::Put, "default");
             }
-            // DEFAULT CF puts (cf="" or "default") are NOT replicated —
-            // only WRITE CF commit drives replication.
         }
 
         match put.cf.as_str() {
