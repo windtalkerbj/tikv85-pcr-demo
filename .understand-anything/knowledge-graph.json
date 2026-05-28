@@ -1,0 +1,558 @@
+{
+  "version": "1.0",
+  "generatedAt": "2026-05-26",
+  "projectRoot": "/Users/cjn/Documents/OpenSource/dig_tidb/tikv85",
+  "projectName": "TiKV PCR Demo",
+  "description": "Physical Cluster Replication — full scan + live CDC, span-based subscription, SST ingest bypass Raft",
+  "nodes": [
+    {
+      "id": "file:cdc:delegate",
+      "type": "module",
+      "name": "delegate",
+      "filePath": "components/cdc/src/delegate.rs",
+      "layer": "service",
+      "language": "rust",
+      "summary": "CDC delegate: 核心 PCR 事件生产者。捕获 CDC observer 的 apply cmd batch，解析 WriteRef 生成 LogicalMutation，通过 shared_sink 发送给 relay。支持 auto_match_pcr 自动注册 PCR sink，旧值回退 old_value_cb。",
+      "concepts": ["async-await"],
+      "publicTypes": [
+        "Delegate { region_id, pcr_event_sink, pcr_batcher, lock_tracker, downstreams }",
+        "Downstream { id, sink, state, region_epoch }",
+        "DownstreamState { Uninitialized, Initializing, Normal, Stopped }"
+      ],
+      "keyFunctions": [
+        "on_batch(cmd_batch) → 处理 CDC cmd batch，生成 PCR 事件",
+        "sink_data(requests) → 解析 Put/Delete/IngestSst → PcrKvBatch",
+        "emit_pcr_event(event) → 通过 pcr_event_sink.unbounded_send 发送",
+        "enable_pcr(sink) → 注册 PCR event sink + 初始化 batcher",
+        "has_pcr() → PCR 是否已激活"
+      ]
+    },
+    {
+      "id": "file:cdc:span_bridge",
+      "type": "module",
+      "name": "span_bridge",
+      "filePath": "components/cdc/src/span_bridge.rs",
+      "layer": "service",
+      "language": "rust",
+      "summary": "SpanBridge: source 侧 PCR 总控。解析 span 到 region，全量扫描 RocksDB，注册 span subscription，运行 relay task + gRPC writer。30s rediscovery 发现新 region，1MB streaming batch 控制内存。",
+      "concepts": ["async-await", "observers"],
+      "publicTypes": [
+        "SpanBridge { span_start, span_end, source_pd, pcr_resolved_ts }"
+      ],
+      "keyFunctions": [
+        "run(scheduler, source_engine, sink) → 主入口：注册 sub、全量扫、relay + writer",
+        "resolve_regions() → PD HTTP API 解析 span 到 region 列表",
+        "scan_region(region_id, engine, merge_tx) → 流式全量扫描单个 region",
+        "hex_decode(hex_str) → PD API 返回 hex key 解码"
+      ]
+    },
+    {
+      "id": "file:cdc:endpoint",
+      "type": "module",
+      "name": "endpoint",
+      "filePath": "components/cdc/src/endpoint.rs",
+      "layer": "service",
+      "language": "rust",
+      "summary": "CDC Endpoint: TiKV CDC 服务端。管理所有 region delegate 的生命周期，PcrRegistry 持有 span subscription，auto_match_pcr 在 delegate 出生时自动匹配 PCR sink。处理 Task 枚举的调度。",
+      "concepts": ["async-await", "observers"],
+      "publicTypes": [
+        "Endpoint<T, E, S> { capture_regions, pcr_registry, cdc_handle }",
+        "Task { RegisterSpanSubscription, StartPcrStream, RegisterPcrSpan, ... }",
+        "Deregister { region_id, downstream_id }",
+        "Validate { region_id, epoch }"
+      ],
+      "keyFunctions": [
+        "auto_match_pcr(delegate, registry) → delegate 出生时自动匹配 span subscription",
+        "on_start_pcr_stream(region_id) → 创建/更新 region delegate",
+        "on_register_span_subscription(sub) → 注册 span sub + 给所有 delegate enable_pcr",
+        "handle_deregister(region_id) → delegate 下线处理"
+      ]
+    },
+    {
+      "id": "file:cdc:pcr_registry",
+      "type": "module",
+      "name": "pcr_registry",
+      "filePath": "components/cdc/src/pcr_registry.rs",
+      "layer": "service",
+      "language": "rust",
+      "summary": "PcrRegistry: span subscription 注册表。持有全局 span → shared_sink 映射，match_region 用 key range 匹配，split 后 child delegate 零窗口继承 shared sink。",
+      "concepts": [],
+      "publicTypes": [
+        "SpanSubscription { start_key, end_key, sink, event_buffer_size }",
+        "PcrRegistry { subscriptions }"
+      ],
+      "keyFunctions": [
+        "register(sub) → 注册 span subscription",
+        "match_region(region_id, r_start, r_end) → key range 匹配，返回 shared sink",
+        "clear() → 清空所有 subscription",
+        "len() → 活跃 subscription 数量"
+      ]
+    },
+    {
+      "id": "file:cdc:logical_mutation",
+      "type": "module",
+      "name": "logical_mutation",
+      "filePath": "components/cdc/src/logical_mutation.rs",
+      "layer": "service",
+      "language": "rust",
+      "summary": "LogicalMutation: WriteRef → 语义操作转换。将 WriteRef 解析为 Put/Delete/Rollback/Checkpoint 等逻辑操作，统一处理 full scan 和 live CDC 的输出格式。",
+      "concepts": ["pattern-matching"],
+      "publicTypes": [
+        "LogicalMutation { Put(Key, Vec<u8>), Delete(Key), Rollback(Key), AddCheckpoint(Key, u64), ... }"
+      ],
+      "keyFunctions": [
+        "from_write_ref(write_ref, key) → WriteRef 解析为 LogicalMutation",
+        "from_write_cf(key, write_ref, value) → 从 WRITE CF 数据生成 LogicalMutation"
+      ]
+    },
+    {
+      "id": "file:cdc:pcr_snapshot",
+      "type": "module",
+      "name": "pcr_snapshot",
+      "filePath": "components/cdc/src/pcr_snapshot.rs",
+      "layer": "service",
+      "language": "rust",
+      "summary": "PCR Snapshot: RocksDB 流式全量扫描。支持 WRITE CF + DEFAULT CF 扫描，O(1MB) 内存 batch，callback 分批发送 PcrKvBatch。",
+      "concepts": ["iterators"],
+      "publicTypes": [],
+      "keyFunctions": [
+        "stream_cf_full(engine, cf, region_id, callback) → O(1MB) 流式扫描主入口",
+        "scan_default_cf(snapshot, start, end, callback) → DEFAULT CF 扫描",
+        "scan_write_cf_raw(snapshot, start, end, callback) → WRITE CF raw 扫描",
+        "scan_write_cf_raw_since(snapshot, start, end, since_ts, callback) → 增量扫描",
+        "scan_delta_entries(snapshot, start, end, since_ts, callback) → 增量 entry 扫描"
+      ]
+    },
+    {
+      "id": "file:cdc:pcr_event_batcher",
+      "type": "module",
+      "name": "pcr_event_batcher",
+      "filePath": "components/cdc/src/pcr_event_batcher.rs",
+      "layer": "utility",
+      "language": "rust",
+      "summary": "PcrEventBatcher: PCR 事件批量构建器。按字节阈值积累 KV，达到 batch_size 后 flush 为 PcrEvent。支持 force-flush。",
+      "concepts": [],
+      "publicTypes": [
+        "PcrEventBatcher { kvs, size, batch_size, last_flush }"
+      ],
+      "keyFunctions": [
+        "add_kv(key, value, cf) → 添加 KV 到 batch",
+        "flush() → 生成 PcrEvent 并重置 batch",
+        "size() → 当前 batch 字节数"
+      ]
+    },
+    {
+      "id": "file:cdc:observer",
+      "type": "module",
+      "name": "observer",
+      "filePath": "components/cdc/src/observer.rs",
+      "layer": "service",
+      "language": "rust",
+      "summary": "CdcObserver: Raft apply 路径的 CDC observer。在 on_flush_applied_cmd_batch 中捕获所有 committed cmd，转发给对应 region 的 delegate。",
+      "concepts": ["observers"],
+      "publicTypes": [
+        "CdcObserver { scheduler }"
+      ],
+      "keyFunctions": [
+        "on_flush_applied_cmd_batch(cmd_batch) → 捕获 apply cmd → 调度给 delegate"
+      ]
+    },
+    {
+      "id": "file:cdc:pcr_service",
+      "type": "module",
+      "name": "pcr_service",
+      "filePath": "components/cdc/src/pcr_service.rs",
+      "layer": "api",
+      "language": "rust",
+      "summary": "PCR gRPC service: 暴露 Subscribe RPC，consumer 通过 gRPC stream 订阅 span 的 PcrEvent 流。",
+      "concepts": ["async-await"],
+      "publicTypes": [
+        "Service { scheduler }"
+      ],
+      "keyFunctions": [
+        "create_pcr_stream_service(service) → 创建 gRPC service",
+        "subscribe(ctx, req, sink) → gRPC Subscribe handler",
+        "build_data_key(raw_key) → 添加 z DATA_PREFIX"
+      ]
+    },
+    {
+      "id": "file:cdc:pcr_metrics",
+      "type": "module",
+      "name": "pcr_metrics",
+      "filePath": "components/cdc/src/pcr_metrics.rs",
+      "layer": "utility",
+      "language": "rust",
+      "summary": "PCR Producer Metrics: Prometheus 指标，emit_pcr_event 计数器、bridge bytes sent、region lag。",
+      "concepts": [],
+      "publicTypes": [
+        "PcrProducerMetrics { cdc_events_generated, bridge_bytes_sent, region_lag_seconds }"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "id": "file:cdc:channel",
+      "type": "module",
+      "name": "channel",
+      "filePath": "components/cdc/src/channel.rs",
+      "layer": "utility",
+      "language": "rust",
+      "summary": "CDC Channel: 基于 futures unbounded channel 的 Sink/Drain 对，支持 backpressure force 模式。",
+      "concepts": ["async-await"],
+      "publicTypes": [
+        "Sink { tx, memory_quota }",
+        "Drain { rx, memory_quota }",
+        "CdcEvent { Event(Event), Barrier(Option<u64>), ... }",
+        "SendError { Disconnected, Full, Congested }"
+      ],
+      "keyFunctions": [
+        "channel(conn_id, buffer, quota) → (Sink, Drain)",
+        "Sink::unbounded_send(event) → Result",
+        "Drain::recv() → CdcEvent"
+      ]
+    },
+    {
+      "id": "file:cdc:initializer",
+      "type": "module",
+      "name": "initializer",
+      "filePath": "components/cdc/src/initializer.rs",
+      "layer": "service",
+      "language": "rust",
+      "summary": "CDC Initializer: region 初始增量扫描。获取 RocksDB snapshot，遍历 KV entries 发送给 downstream。",
+      "concepts": ["iterators"],
+      "publicTypes": [
+        "KvEntry { key, value, ts }"
+      ],
+      "keyFunctions": [
+        "initialize_region(delegate) → region incremental scan"
+      ]
+    },
+    {
+      "id": "file:cdc:old_value",
+      "type": "module",
+      "name": "old_value",
+      "filePath": "components/cdc/src/old_value.rs",
+      "layer": "utility",
+      "language": "rust",
+      "summary": "Old Value Cache: 当 WriteRef short_value=None 时，通过 RocksDB snapshot 回查 DEFAULT CF 获取旧值。",
+      "concepts": ["iterators"],
+      "publicTypes": [
+        "OldValueCache { cache, mem_quota }",
+        "OldValueCursors<S> { default_cursor, write_cursor, lock_cursor }"
+      ],
+      "keyFunctions": [
+        "get_old_value(snapshot, key, start_ts) → Option<Vec<u8>>",
+        "new_old_value_cursor(snapshot, cf) → Cursor",
+        "near_seek_old_value(cursor, key, ts) → 二分定位 MVCC 版本"
+      ]
+    },
+    {
+      "id": "file:cdc:service",
+      "type": "module",
+      "name": "service",
+      "filePath": "components/cdc/src/service.rs",
+      "layer": "api",
+      "language": "rust",
+      "summary": "CDC Service: TiKV CDC gRPC 服务（EventFeed RPC），管理 connection/请求生命周期。",
+      "concepts": [],
+      "publicTypes": [
+        "Conn { id, feature_gate }",
+        "ConnId(usize)",
+        "RequestId(u64)",
+        "Service { scheduler }",
+        "FeatureGate"
+      ],
+      "keyFunctions": [
+        "validate_kv_api(kv_api) → 校验 KV API 版本"
+      ]
+    },
+    {
+      "id": "file:cdc:txn_source",
+      "type": "module",
+      "name": "txn_source",
+      "filePath": "components/cdc/src/txn_source.rs",
+      "layer": "utility",
+      "language": "rust",
+      "summary": "TxnSource: 区分事务来源（TiDB/KV API）和事务类型（乐观/悲观）。",
+      "concepts": [],
+      "publicTypes": [
+        "TxnSource { TiDB, RawKV }"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "id": "file:ingest:task",
+      "type": "module",
+      "name": "task (stream-ingest)",
+      "filePath": "components/stream-ingest/src/task.rs",
+      "layer": "service",
+      "language": "rust",
+      "summary": "StreamIngestTask: Consumer 端主控。gRPC Subscribe → 接 PcrEvent → SstBatcher → DirectIngest。管理 PCR 生命周期（create/pause/resume/cutover），DDL discover，TSO bumper 500K/1s。",
+      "concepts": ["async-await"],
+      "publicTypes": [
+        "StreamIngestTask<E> { cfg, batcher, checkpoint_mgr, schema_sync, state }",
+        "Task { PcrEvent(PcrEventWithMeta), ConfigChange, PauseReplication, ... }",
+        "TopologyChange { NewRegion, RemoveRegion }",
+        "TopologyDiff { added, removed }"
+      ],
+      "keyFunctions": [
+        "run() → 主事件循环：tokio::select! { event, tso_bump, ddl_discover }",
+        "handle_event(event_with_meta) → PcrEvent → SstBatcher → DirectIngest",
+        "batch_get_tso(count) → PD gRPC TSO bumper"
+      ]
+    },
+    {
+      "id": "file:ingest:sst_batcher",
+      "type": "module",
+      "name": "sst_batcher",
+      "filePath": "components/stream-ingest/src/sst_batcher.rs",
+      "layer": "service",
+      "language": "rust",
+      "summary": "SstBatcher: KV 缓冲 → SST 文件生成。按 Region 分组排序，达到阈值后生成 SST → DirectIngest 写入。支持流式 flush。",
+      "concepts": [],
+      "publicTypes": [
+        "SstBatcher<E> { kv_buffer, sst_writer, current_region }",
+        "MvccKeyValue { key, value }",
+        "FlushReason { KvBufferFull, RegionBoundary, Checkpoint }",
+        "FlushResult { region_id, ingested_bytes, ingested_kvs }"
+      ],
+      "keyFunctions": [
+        "add_kv(kv) → FlushReason",
+        "flush() → 排序 KV → 生成 SST → DirectIngest → 重置缓冲"
+      ]
+    },
+    {
+      "id": "file:ingest:direct_ingest",
+      "type": "module",
+      "name": "direct_ingest",
+      "filePath": "components/stream-ingest/src/direct_ingest.rs",
+      "layer": "service",
+      "language": "rust",
+      "summary": "DirectIngest: SST 直写目标 RocksDB（绕过 Raft）。校验 RegionEpoch，获取 IngestLatch 防并发，调用 RocksDB IngestExternalFile。",
+      "concepts": [],
+      "publicTypes": [
+        "DirectIngestContext<E> { tablet_registry, pd_client }"
+      ],
+      "keyFunctions": [
+        "ingest_sst(region_id, sst_data, start, end) → (region_id, bytes, kvs)",
+        "pd_client() → &Arc<dyn PdClient>"
+      ]
+    },
+    {
+      "id": "file:ingest:schema_sync",
+      "type": "module",
+      "name": "schema_sync",
+      "filePath": "components/stream-ingest/src/schema_sync.rs",
+      "layer": "service",
+      "language": "rust",
+      "summary": "SchemaSync: DDL discover + schema version bump。每秒轮询 source TiDB DDL 历史表，发现新 DDL job → bump schema → 同步到目标 PD。",
+      "concepts": ["async-await"],
+      "publicTypes": [
+        "SchemaSync { source_tidb, target_pd, last_version, ddl_cache }"
+      ],
+      "keyFunctions": [
+        "bump_schema() → bump target PD schema version",
+        "discover_ddl(source_tidb) → 查询 DDL job 历史"
+      ]
+    },
+    {
+      "id": "file:ingest:checkpoint",
+      "type": "module",
+      "name": "checkpoint",
+      "filePath": "components/stream-ingest/src/checkpoint.rs",
+      "layer": "utility",
+      "language": "rust",
+      "summary": "CheckpointManager: PCR 复制进度持久化。记录 frontier 到文件/pd，支持 pause/resume 断点续传。",
+      "concepts": [],
+      "publicTypes": [
+        "CheckpointManager { pd_client, task_id, last_recorded_ts }"
+      ],
+      "keyFunctions": [
+        "record_checkpoint(frontier) → 持久化当前复制进度",
+        "load_checkpoint() → 恢复历史 checkpoint"
+      ]
+    },
+    {
+      "id": "file:ingest:http_control",
+      "type": "module",
+      "name": "http_control",
+      "filePath": "components/stream-ingest/src/http_control.rs",
+      "layer": "api",
+      "language": "rust",
+      "summary": "PcrControlServer: PCR HTTP API 服务。提供 /pcr/status、/pcr/create、/pcr/pause、/pcr/resume、/pcr/cutover、/pcr/activate 端点。",
+      "concepts": ["async-await"],
+      "publicTypes": [
+        "PcrControlServer { task_scheduler, state }"
+      ],
+      "keyFunctions": [
+        "handle_status() → JSON PCR 状态",
+        "handle_create(req) → 创建 PCR 复制任务",
+        "handle_pause() → 暂停复制 + 保存 checkpoint",
+        "handle_resume() → 从 checkpoint 恢复",
+        "handle_cutover() → 停止复制，准备切换",
+        "handle_activate() → 激活目标集群（释放写保护）"
+      ]
+    },
+    {
+      "id": "file:ingest:subscriber",
+      "type": "module",
+      "name": "subscriber",
+      "filePath": "components/stream-ingest/src/subscriber.rs",
+      "layer": "service",
+      "language": "rust",
+      "summary": "StreamSubscriber: gRPC 多分区订阅管理。管理多个 source TiKV 的 gRPC stream，合并事件到统一 channel。",
+      "concepts": ["async-await"],
+      "publicTypes": [
+        "StreamSubscriber { active_streams, merged_events }",
+        "PartitionSubscription { region_id, start_ts, source_addr }",
+        "PcrEventWithMeta { event, region_id }",
+        "SubscriptionState { Active, Reconnecting, Failed }",
+        "StreamErrorKind { NetworkError, EpochMismatch, RegionNotFound }"
+      ],
+      "keyFunctions": [
+        "subscribe(partition) → 建立 gRPC stream",
+        "events() → &mut UnboundedReceiver<PcrEventWithMeta>",
+        "classify_error(err) → StreamErrorKind"
+      ]
+    },
+    {
+      "id": "file:ingest:metrics",
+      "type": "module",
+      "name": "metrics (stream-ingest)",
+      "filePath": "components/stream-ingest/src/metrics.rs",
+      "layer": "utility",
+      "language": "rust",
+      "summary": "StreamIngestMetrics: Prometheus 指标。pcr_state gauge、ingested_bytes/kvs counter、SST latency histogram、region lag、errors。",
+      "concepts": [],
+      "publicTypes": [
+        "StreamIngestMetrics { pcr_state, ingested_bytes, ingested_kvs, checkpoint_lag, errors }"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "id": "file:ingest:config",
+      "type": "module",
+      "name": "config (stream-ingest)",
+      "filePath": "components/stream-ingest/src/config.rs",
+      "layer": "utility",
+      "language": "rust",
+      "summary": "StreamIngestConfig: PCR 运行参数配置（buffer 大小、flush 间隔、checkpoint 频率、source PD 地址）。支持动态热更新。",
+      "concepts": [],
+      "publicTypes": [
+        "StreamIngestConfig { max_kv_buffer_size, min_flush_interval, source_address }",
+        "StreamIngestConfigManager { config, scheduler }"
+      ],
+      "keyFunctions": []
+    },
+    {
+      "id": "file:cdc:errors",
+      "type": "module",
+      "name": "errors (cdc)",
+      "filePath": "components/cdc/src/errors.rs",
+      "layer": "utility",
+      "language": "rust",
+      "summary": "CDC Error 类型定义。",
+      "concepts": [],
+      "publicTypes": ["Error { ... }"],
+      "keyFunctions": []
+    },
+    {
+      "id": "file:ingest:errors",
+      "type": "module",
+      "name": "errors (stream-ingest)",
+      "filePath": "components/stream-ingest/src/errors.rs",
+      "layer": "utility",
+      "language": "rust",
+      "summary": "StreamIngest Error 类型定义。TabletNotFound, EpochMismatch, IngestError 等。",
+      "concepts": [],
+      "publicTypes": ["Error { TabletNotFound, EpochMismatch, IngestError, ... }"],
+      "keyFunctions": []
+    },
+    {
+      "id": "file:cdc:config",
+      "type": "module",
+      "name": "config (cdc)",
+      "filePath": "components/cdc/src/config.rs",
+      "layer": "utility",
+      "language": "rust",
+      "summary": "CDC 配置管理。CdcConfigManager 封装 Scheduler<Task> 用于动态配置变更通知。",
+      "concepts": [],
+      "publicTypes": ["CdcConfigManager(pub Scheduler<Task>)"],
+      "keyFunctions": []
+    },
+    {
+      "id": "file:cdc:metrics",
+      "type": "module",
+      "name": "metrics (cdc)",
+      "filePath": "components/cdc/src/metrics.rs",
+      "layer": "utility",
+      "language": "rust",
+      "summary": "CDC 原始 Prometheus 指标（与 PCR 指标独立）。",
+      "concepts": [],
+      "publicTypes": [],
+      "keyFunctions": ["tls_flush_perf_stats()", "flush_oldvalue_stats()"]
+    }
+  ],
+  "edges": [
+    {"id": "e1",  "source": "file:cdc:observer",    "target": "file:cdc:delegate",     "type": "calls", "label": "on_flush_applied_cmd_batch → delegate.on_batch"},
+    {"id": "e2",  "source": "file:cdc:delegate",    "target": "file:cdc:logical_mutation", "type": "calls", "label": "sink_data → LogicalMutation::from_write_ref"},
+    {"id": "e3",  "source": "file:cdc:delegate",    "target": "file:cdc:pcr_event_batcher", "type": "uses", "label": "add_kv → PcrEventBatcher"},
+    {"id": "e4",  "source": "file:cdc:delegate",    "target": "file:cdc:channel",    "type": "uses", "label": "pcr_event_sink: UnboundedSender"},
+    {"id": "e5",  "source": "file:cdc:delegate",    "target": "file:cdc:old_value",  "type": "calls", "label": "old_value_cb → get_old_value"},
+    {"id": "e6",  "source": "file:cdc:span_bridge", "target": "file:cdc:endpoint",    "type": "calls", "label": "Task::RegisterSpanSubscription"},
+    {"id": "e7",  "source": "file:cdc:span_bridge", "target": "file:cdc:pcr_snapshot", "type": "calls", "label": "full scan → stream_cf_full"},
+    {"id": "e8",  "source": "file:cdc:span_bridge", "target": "file:cdc:pcr_service", "type": "uses", "label": "gRPC sink: PcrEvent stream"},
+    {"id": "e9",  "source": "file:cdc:endpoint",    "target": "file:cdc:pcr_registry", "type": "uses", "label": "auto_match_pcr → match_region"},
+    {"id": "e10", "source": "file:cdc:endpoint",    "target": "file:cdc:delegate",    "type": "calls", "label": "enable_pcr(sink) on delegate"},
+    {"id": "e11", "source": "file:cdc:pcr_service", "target": "file:cdc:endpoint",    "type": "calls", "label": "subscribe → scheduler.schedule(Task)"},
+    {"id": "e12", "source": "file:ingest:task",      "target": "file:ingest:sst_batcher", "type": "uses", "label": "handle_event → SstBatcher::add_kv"},
+    {"id": "e13", "source": "file:ingest:task",      "target": "file:ingest:direct_ingest", "type": "calls", "label": "flush → ingest_sst"},
+    {"id": "e14", "source": "file:ingest:task",      "target": "file:ingest:checkpoint", "type": "uses", "label": "checkpoint ticker → record_checkpoint"},
+    {"id": "e15", "source": "file:ingest:task",      "target": "file:ingest:schema_sync", "type": "uses", "label": "ddl_discover → SchemaSync"},
+    {"id": "e16", "source": "file:ingest:task",      "target": "file:ingest:http_control", "type": "calls", "label": "lifecycle → Task variants"},
+    {"id": "e17", "source": "file:ingest:task",      "target": "file:ingest:subscriber", "type": "uses", "label": "events → StreamSubscriber"},
+    {"id": "e18", "source": "file:ingest:sst_batcher", "target": "file:ingest:direct_ingest", "type": "calls", "label": "flush → ingest_sst"},
+    {"id": "e19", "source": "file:ingest:http_control", "target": "file:ingest:task",      "type": "calls", "label": "HTTP → StreamIngestTask"},
+    {"id": "e20", "source": "file:cdc:delegate",    "target": "file:ingest:metrics",  "type": "uses", "label": "STREAM_INGEST_METRICS"},
+    {"id": "e21", "source": "file:cdc:delegate",    "target": "file:cdc:pcr_metrics",  "type": "uses", "label": "PCR_PRODUCER_METRICS"},
+    {"id": "e22", "source": "file:cdc:span_bridge", "target": "file:cdc:delegate",     "type": "calls", "label": "auto_match → enable_pcr"},
+    {"id": "e23", "source": "file:cdc:delegate",    "target": "file:cdc:initializer",  "type": "uses", "label": "incremental scan"},
+    {"id": "e24", "source": "file:cdc:endpoint",    "target": "file:cdc:observer",     "type": "uses", "label": "capture_change → CdcObserver"},
+    {"id": "e25", "source": "file:ingest:schema_sync", "target": "file:ingest:task",     "type": "calls", "label": "bump → target PD HTTP"}
+  ],
+  "tours": [
+    {
+      "name": "PCR 数据流 — 全量扫描",
+      "description": "从 SpanBridge 启动到初始全量扫描完成的完整路径",
+      "steps": [
+        {"nodeId": "file:cdc:span_bridge", "note": "run() → resolve_regions() → scan_region()"},
+        {"nodeId": "file:cdc:pcr_snapshot", "note": "stream_cf_full: RocksDB iterator → callback → PcrKvBatch"},
+        {"nodeId": "file:cdc:pcr_service", "note": "gRPC sink.send(PcrEvent) → consumer 接收"},
+        {"nodeId": "file:ingest:sst_batcher", "note": "SstBatcher 排序 + flush"},
+        {"nodeId": "file:ingest:direct_ingest", "note": "IngestExternalFile → target RocksDB"}
+      ]
+    },
+    {
+      "name": "PCR 数据流 — Live CDC",
+      "description": "从 CDC observer 到 target RocksDB 的实时复制路径",
+      "steps": [
+        {"nodeId": "file:cdc:observer", "note": "on_flush_applied_cmd_batch → delegate.on_batch"},
+        {"nodeId": "file:cdc:delegate", "note": "sink_data → LogicalMutation → emit_pcr_event"},
+        {"nodeId": "file:cdc:pcr_event_batcher", "note": "PcrEventBatcher.force_flush → Vec<u8>"},
+        {"nodeId": "file:cdc:channel", "note": "unbounded_send → fut_tx → relay → merge_tx"},
+        {"nodeId": "file:cdc:pcr_service", "note": "gRPC writer → consumer"},
+        {"nodeId": "file:ingest:sst_batcher", "note": "SstBatcher → DirectIngest"},
+        {"nodeId": "file:ingest:direct_ingest", "note": "target RocksDB"}
+      ]
+    },
+    {
+      "name": "PCR 生命周期",
+      "description": "create → pause → resume → cutover → activate",
+      "steps": [
+        {"nodeId": "file:ingest:http_control", "note": "HTTP API: /pcr/create"},
+        {"nodeId": "file:ingest:task", "note": "StreamIngestTask: state machine"},
+        {"nodeId": "file:ingest:schema_sync", "note": "DDL discover + schema bump"},
+        {"nodeId": "file:ingest:checkpoint", "note": "pause → save, resume → load"}
+      ]
+    }
+  ]
+}

@@ -288,3 +288,12 @@ When uncertain:
 classify first,
 validate second,
 escalate last.
+
+# semantic validation item：
+
+
+  ALTER TABLE ADD COLUMN online visibility
+  CREATE INDEX online visibility
+  schema reload correctness
+  goroutine lifecycle correctness
+  reload consistency
