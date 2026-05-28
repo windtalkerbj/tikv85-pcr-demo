@@ -565,3 +565,9 @@ Builder MUST produce:
 Conversation alone does NOT count as completed work.
 
 All important conclusions MUST persist to filesystem artifacts.
+
+All agents MUST read:
+
+- ENGINEERING_RULES.md
+
+before making modifications.

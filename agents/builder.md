@@ -346,3 +346,8 @@ Builder SHOULD avoid:
 
 Builder optimization priority:
 reduce feedback loop latency.
+
+Builder MUST NOT modify more than:
+
+- 1 file before build
+- 1 logical feature before validation
